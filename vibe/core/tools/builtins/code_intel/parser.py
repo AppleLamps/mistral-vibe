@@ -155,6 +155,25 @@ class CodeParser:
         except (TreeSitterNotAvailable, ValueError):
             return None
 
+    def parse_bytes(self, content: bytes, language: str) -> Tree | None:
+        """Parse source code from bytes.
+
+        This method allows callers to read file content once and use it for
+        both parsing and subsequent analysis, avoiding duplicate file reads.
+
+        Args:
+            content: Source code as bytes
+            language: Language name
+
+        Returns:
+            Tree-sitter Tree object, or None if parsing fails
+        """
+        try:
+            parser = self._get_parser(language)
+            return parser.parse(content)
+        except (TreeSitterNotAvailable, ValueError):
+            return None
+
     def clear_cache(self) -> None:
         """Clear the AST cache."""
         self._ast_cache.clear()

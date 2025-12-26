@@ -281,23 +281,29 @@ class SymbolSearch(
         operation: SymbolOp,
         parser: object,  # CodeParser
     ) -> list[SymbolMatch]:
-        """Search for symbol in a single file."""
+        """Search for symbol in a single file.
+
+        Optimized to read the file only once - the source bytes are used for
+        both parsing (via parse_bytes) and subsequent analysis.
+        """
         from vibe.core.tools.builtins.code_intel.parser import CodeParser
 
         if not isinstance(parser, CodeParser):
-            return []
-
-        tree = parser.parse_file(file_path)
-        if tree is None:
             return []
 
         language = get_language_for_file(file_path)
         if language is None:
             return []
 
+        # Read file content once - used for both parsing and analysis
         try:
             source = file_path.read_bytes()
         except OSError:
+            return []
+
+        # Parse using the already-read bytes (avoids duplicate file read)
+        tree = parser.parse_bytes(source, language)
+        if tree is None:
             return []
 
         matches: list[SymbolMatch] = []
