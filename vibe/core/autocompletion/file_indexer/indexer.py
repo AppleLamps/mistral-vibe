@@ -126,6 +126,12 @@ class FileIndexer:
             done_event.set()
 
     def _rebuild_worker(self, root: Path, task: _RebuildTask) -> None:
+        """Rebuild file index in background thread.
+
+        Optimized to reduce lock contention by building index without holding main lock.
+        Only acquires lock briefly to swap the reference (copy-on-write pattern).
+        This allows autocomplete queries to proceed during rebuild.
+        """
         try:
             if task.cancel_event.is_set():  # cancelled before work began
                 with self._rebuild_lock:
@@ -137,15 +143,39 @@ class FileIndexer:
                     self._active_rebuilds.pop(root, None)
                     return
 
-            with self._lock:  # exclusive access while rebuilding the store
+            # Build index WITHOUT holding main lock (this is the slow part)
+            # This allows autocomplete to use existing index while we rebuild
+            resolved_root = root.resolve()
+
+            # Check for cancellation before expensive operation
+            if task.cancel_event.is_set():
+                with self._rebuild_lock:
+                    self._active_rebuilds.pop(root, None)
+                return
+
+            # Prepare ignore rules (fast operation, but needs to be done first)
+            with self._lock:
+                self._ignore_rules.ensure_for_root(resolved_root)
+
+            # Walk directory WITHOUT holding the lock (this is the slow I/O operation)
+            # Other threads can still read the current index during this time
+            entries = self._store._walk_directory(
+                resolved_root, cancel_check=lambda: task.cancel_event.is_set()
+            )
+
+            # Only acquire lock briefly to update store (fast operation)
+            # This is the copy-on-write swap
+            with self._lock:
                 if task.cancel_event.is_set():
                     with self._rebuild_lock:
                         self._active_rebuilds.pop(root, None)
                     return
 
-                self._store.rebuild(
-                    root, should_cancel=lambda: task.cancel_event.is_set()
-                )
+                # Fast in-place update of internal state
+                self._store._entries_by_rel = {entry.rel: entry for entry in entries}
+                self._store._ordered_entries = entries
+                self._store._root = resolved_root
+                self._stats.rebuilds += 1
 
             with self._rebuild_lock:
                 self._active_rebuilds.pop(root, None)

@@ -167,12 +167,22 @@ class ProjectContextProvider:
     def _process_directory(
         self, path: Path, prefix: str, depth: int, is_root: bool = False
     ) -> Generator[str]:
+        """Process a directory and yield tree structure lines.
+
+        Optimized to avoid creating unnecessary intermediate list.
+        Filters and counts in a single pass instead of materializing all items first.
+        """
         if depth > self.config.max_depth or self._should_stop():
             return
 
         try:
-            all_items = list(path.iterdir())
-            items = [item for item in all_items if not self._is_ignored(item)]
+            # Filter items while counting total (avoids storing all items in memory)
+            items = []
+            total_item_count = 0
+            for item in path.iterdir():
+                total_item_count += 1
+                if not self._is_ignored(item):
+                    items.append(item)
 
             items.sort(key=lambda p: (not p.is_dir(), p.name.lower()))
 
@@ -196,7 +206,7 @@ class ProjectContextProvider:
                     yield from self._process_directory(item, child_prefix, depth + 1)
 
             if show_truncation and not self._should_stop():
-                remaining = len(all_items) - len(items)
+                remaining = total_item_count - len(items)
                 yield f"{prefix}└── ... ({remaining} more items)"
 
         except (PermissionError, OSError):
