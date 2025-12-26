@@ -102,14 +102,21 @@ class ReadFile(
         return None
 
     def _prepare_and_validate_path(self, args: ReadFileArgs) -> Path:
+        """Prepare and validate the file path, resolving once for efficiency."""
         self._validate_inputs(args)
 
         file_path = Path(args.path).expanduser()
         if not file_path.is_absolute():
             file_path = self.config.effective_workdir / file_path
 
-        self._validate_path(file_path)
-        return file_path
+        # Resolve once and use for all validation
+        try:
+            resolved_path = file_path.resolve()
+        except ValueError:
+            raise ToolError(f"Invalid file path: {file_path}")
+
+        self._validate_resolved_path(resolved_path)
+        return resolved_path
 
     async def _read_file(self, args: ReadFileArgs, file_path: Path) -> _ReadResult:
         try:
@@ -154,12 +161,9 @@ class ReadFile(
         if args.limit is not None and args.limit <= 0:
             raise ToolError("Limit, if provided, must be a positive number")
 
-    def _validate_path(self, file_path: Path) -> None:
+    def _validate_resolved_path(self, resolved_path: Path) -> None:
+        """Validate an already-resolved path. Avoids duplicate resolve() calls."""
         project_root = self.config.effective_workdir.resolve()
-        try:
-            resolved_path = file_path.resolve()
-        except ValueError:
-            raise ToolError(f"Invalid file path: {file_path}")
 
         try:
             resolved_path.relative_to(project_root)
@@ -169,12 +173,13 @@ class ReadFile(
             )
 
         if not resolved_path.exists():
-            raise ToolError(f"File not found at: {file_path}")
+            raise ToolError(f"File not found at: {resolved_path}")
         if resolved_path.is_dir():
-            raise ToolError(f"Path is a directory, not a file: {file_path}. Use list_dir tool to explore directory contents.")
+            raise ToolError(f"Path is a directory, not a file: {resolved_path}. Use list_dir tool to explore directory contents.")
 
-    def _update_state_history(self, file_path: Path) -> None:
-        self.state.recently_read_files.append(str(file_path.resolve()))
+    def _update_state_history(self, resolved_path: Path) -> None:
+        """Update state history with already-resolved path."""
+        self.state.recently_read_files.append(str(resolved_path))
         if len(self.state.recently_read_files) > self.config.max_state_history:
             self.state.recently_read_files.pop(0)
 
