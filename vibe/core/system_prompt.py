@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Generator
 import fnmatch
 import html
@@ -232,49 +233,82 @@ class ProjectContextProvider:
 
         return structure
 
-    def get_git_status(self) -> str:
+    async def _run_git_command_async(
+        self, args: list[str], timeout: float
+    ) -> tuple[bool, str]:
+        """Run a git command asynchronously.
+
+        Returns (success, output) tuple.
+        """
+        try:
+            if is_windows():
+                # On Windows, need to handle stdin differently
+                process = await asyncio.create_subprocess_exec(
+                    "git",
+                    *args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    cwd=self.root_path,
+                )
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    "git",
+                    *args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=self.root_path,
+                )
+
+            stdout, _ = await asyncio.wait_for(
+                process.communicate(), timeout=timeout
+            )
+            return (process.returncode == 0, stdout.decode("utf-8", errors="ignore"))
+        except asyncio.TimeoutError:
+            return (False, "")
+        except Exception:
+            return (False, "")
+
+    async def _get_git_status_async(self) -> str:
+        """Get git status by running multiple git commands concurrently.
+
+        Optimized to run 4 git commands in parallel instead of sequentially.
+        This reduces total time from sum(all_commands) to max(slowest_command).
+        """
         try:
             timeout = min(self.config.timeout_seconds, 10.0)
             num_commits = self.config.default_commit_count
 
-            current_branch = subprocess.run(
-                ["git", "branch", "--show-current"],
-                capture_output=True,
-                check=True,
-                cwd=self.root_path,
-                stdin=subprocess.DEVNULL if is_windows() else None,
-                text=True,
-                timeout=timeout,
-            ).stdout.strip()
+            # Run all git commands concurrently
+            results = await asyncio.gather(
+                self._run_git_command_async(["branch", "--show-current"], timeout),
+                self._run_git_command_async(["branch", "-r"], timeout),
+                self._run_git_command_async(["status", "--porcelain"], timeout),
+                self._run_git_command_async(
+                    ["log", "--oneline", f"-{num_commits}", "--decorate"], timeout
+                ),
+                return_exceptions=True,
+            )
 
+            # Unpack results
+            branch_success, current_branch = results[0] if not isinstance(results[0], Exception) else (False, "")
+            branches_success, branches_output = results[1] if not isinstance(results[1], Exception) else (False, "")
+            status_success, status_output = results[2] if not isinstance(results[2], Exception) else (False, "")
+            log_success, log_output = results[3] if not isinstance(results[3], Exception) else (False, "")
+
+            if not branch_success:
+                return "Not a git repository or git not available"
+
+            current_branch = current_branch.strip()
+
+            # Determine main branch
             main_branch = "main"
-            try:
-                branches_output = subprocess.run(
-                    ["git", "branch", "-r"],
-                    capture_output=True,
-                    check=True,
-                    cwd=self.root_path,
-                    stdin=subprocess.DEVNULL if is_windows() else None,
-                    text=True,
-                    timeout=timeout,
-                ).stdout
-                if "origin/master" in branches_output:
-                    main_branch = "master"
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                pass
+            if branches_success and "origin/master" in branches_output:
+                main_branch = "master"
 
-            status_output = subprocess.run(
-                ["git", "status", "--porcelain"],
-                capture_output=True,
-                check=True,
-                cwd=self.root_path,
-                stdin=subprocess.DEVNULL if is_windows() else None,
-                text=True,
-                timeout=timeout,
-            ).stdout.strip()
-
-            if status_output:
-                status_lines = status_output.splitlines()
+            # Process status output
+            if status_success and status_output.strip():
+                status_lines = status_output.strip().splitlines()
                 MAX_GIT_STATUS_SIZE = 50
                 if len(status_lines) > MAX_GIT_STATUS_SIZE:
                     status = (
@@ -285,32 +319,24 @@ class ProjectContextProvider:
             else:
                 status = "(clean)"
 
-            log_output = subprocess.run(
-                ["git", "log", "--oneline", f"-{num_commits}", "--decorate"],
-                capture_output=True,
-                check=True,
-                cwd=self.root_path,
-                stdin=subprocess.DEVNULL if is_windows() else None,
-                text=True,
-                timeout=timeout,
-            ).stdout.strip()
-
+            # Process log output
             recent_commits = []
-            for line in log_output.split("\n"):
-                if not (line := line.strip()):
-                    continue
+            if log_success:
+                for line in log_output.split("\n"):
+                    if not (line := line.strip()):
+                        continue
 
-                if " " in line:
-                    commit_hash, commit_msg = line.split(" ", 1)
-                    if (
-                        "(" in commit_msg
-                        and ")" in commit_msg
-                        and (paren_index := commit_msg.rfind("(")) > 0
-                    ):
-                        commit_msg = commit_msg[:paren_index].strip()
-                    recent_commits.append(f"{commit_hash} {commit_msg}")
-                else:
-                    recent_commits.append(line)
+                    if " " in line:
+                        commit_hash, commit_msg = line.split(" ", 1)
+                        if (
+                            "(" in commit_msg
+                            and ")" in commit_msg
+                            and (paren_index := commit_msg.rfind("(")) > 0
+                        ):
+                            commit_msg = commit_msg[:paren_index].strip()
+                        recent_commits.append(f"{commit_hash} {commit_msg}")
+                    else:
+                        recent_commits.append(line)
 
             git_info_parts = [
                 f"Current branch: {current_branch}",
@@ -324,10 +350,28 @@ class ProjectContextProvider:
 
             return "\n".join(git_info_parts)
 
-        except subprocess.TimeoutExpired:
-            return "Git operations timed out (large repository)"
-        except subprocess.CalledProcessError:
-            return "Not a git repository or git not available"
+        except Exception as e:
+            return f"Error getting git status: {e}"
+
+    def get_git_status(self) -> str:
+        """Get git status information.
+
+        Runs multiple git commands concurrently for better performance.
+        Falls back gracefully if git is not available or times out.
+        """
+        try:
+            # Try to get or create an event loop
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            # Run the async git operations
+            return loop.run_until_complete(self._get_git_status_async())
         except Exception as e:
             return f"Error getting git status: {e}"
 

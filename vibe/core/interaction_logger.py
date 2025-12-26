@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 import getpass
 import json
@@ -59,37 +60,58 @@ class InteractionLogger:
         filename = f"{self.session_prefix}_{timestamp}_{self.session_id[:8]}.json"
         return self.save_dir / filename
 
-    def _get_git_commit(self) -> str | None:
+    async def _run_git_command_async(
+        self, args: list[str], timeout: float = 5.0
+    ) -> str | None:
+        """Run a git command asynchronously and return output or None.
+
+        Optimized helper for concurrent git operations.
+        """
         try:
-            result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                capture_output=True,
-                cwd=self.workdir,
-                stdin=subprocess.DEVNULL if is_windows() else None,
-                text=True,
-                timeout=5.0,
+            if is_windows():
+                process = await asyncio.create_subprocess_exec(
+                    "git",
+                    *args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    cwd=self.workdir,
+                )
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    "git",
+                    *args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=self.workdir,
+                )
+
+            stdout, _ = await asyncio.wait_for(
+                process.communicate(), timeout=timeout
             )
-            if result.returncode == 0 and result.stdout:
-                return result.stdout.strip()
-        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+
+            if process.returncode == 0 and stdout:
+                return stdout.decode("utf-8", errors="ignore").strip()
+        except (asyncio.TimeoutError, FileNotFoundError, OSError):
             pass
         return None
 
-    def _get_git_branch(self) -> str | None:
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True,
-                cwd=self.workdir,
-                stdin=subprocess.DEVNULL if is_windows() else None,
-                text=True,
-                timeout=5.0,
-            )
-            if result.returncode == 0 and result.stdout:
-                return result.stdout.strip()
-        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-            pass
-        return None
+    async def _get_git_metadata_async(self) -> tuple[str | None, str | None]:
+        """Get git commit and branch concurrently.
+
+        Optimized to run 2 git commands in parallel instead of sequentially.
+        Reduces initialization time from sum(both_commands) to max(slowest_command).
+        """
+        results = await asyncio.gather(
+            self._run_git_command_async(["rev-parse", "HEAD"]),
+            self._run_git_command_async(["rev-parse", "--abbrev-ref", "HEAD"]),
+            return_exceptions=True,
+        )
+
+        git_commit = results[0] if not isinstance(results[0], Exception) else None
+        git_branch = results[1] if not isinstance(results[1], Exception) else None
+
+        return git_commit, git_branch
 
     def _get_username(self) -> str:
         try:
@@ -98,8 +120,27 @@ class InteractionLogger:
             return "unknown"
 
     def _initialize_session_metadata(self) -> SessionMetadata:
-        git_commit = self._get_git_commit()
-        git_branch = self._get_git_branch()
+        """Initialize session metadata with git information.
+
+        Runs git commands concurrently for faster initialization.
+        """
+        # Get git metadata concurrently
+        try:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            git_commit, git_branch = loop.run_until_complete(
+                self._get_git_metadata_async()
+            )
+        except Exception:
+            git_commit, git_branch = None, None
+
         user_name = self._get_username()
 
         return SessionMetadata(
