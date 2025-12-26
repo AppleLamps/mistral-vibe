@@ -32,8 +32,8 @@ class CommandRegistry:
                 handler="_reload_config",
             ),
             "clear": Command(
-                aliases=frozenset(["/clear"]),
-                description="Clear conversation history",
+                aliases=frozenset(["/clear", "/new"]),
+                description="Clear conversation history and start new",
                 handler="_clear_history",
             ),
             "log": Command(

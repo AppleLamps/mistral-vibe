@@ -61,6 +61,14 @@ pip install mistral-vibe
   - Execute shell commands in a stateful terminal (`bash`).
   - Recursively search code with `grep` (with `ripgrep` support).
   - Manage a `todo` list to track the agent's work.
+  - **Code Intelligence** (AST-based analysis using tree-sitter):
+    - Supports **12 languages**: Python, JavaScript, TypeScript, Go, Rust, Java, C, C++, Ruby, PHP, C#, Kotlin
+    - **Scope tracking**: Distinguish local vs global symbols, parameters, class members
+    - **Smart import resolution**: tsconfig paths, package.json exports, monorepo workspaces
+    - **Documentation extraction**: Python docstrings, JSDoc, JavaDoc, Rust doc comments
+    - `symbol_search`: Find symbol definitions and references with scope and docs.
+    - `dependency_analyzer`: Analyze import relationships with enhanced path resolution.
+    - `refactor`: Safely rename symbols across multiple files with preview.
 - **Project-Aware Context**: Vibe automatically scans your project's file structure and Git status to provide relevant context to the agent, improving its understanding of your codebase.
 - **Advanced CLI Experience**: Built with modern libraries for a smooth and efficient workflow.
   - Autocompletion for slash commands (`/`) and file paths (`@`).

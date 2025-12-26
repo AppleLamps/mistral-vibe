@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Enhanced Code Intelligence Tools** - Comprehensive AST-based code analysis powered by tree-sitter:
+  - **Language Support Expansion**: Now supports 12 languages total:
+    - Python, JavaScript, TypeScript (original)
+    - Go, Rust, Java, C, C++, Ruby, PHP, C#, Kotlin (new)
+  - **Scope Tracking**: Distinguish local vs global symbols, parameters, class members, and instance variables
+  - **Import Resolution**: Smart path resolution for JavaScript/TypeScript ecosystems:
+    - `tsconfig.json` paths support
+    - `package.json` exports
+    - Monorepo workspace detection
+    - `node_modules` resolution
+  - **Docstring Extraction**: Extract documentation from:
+    - Python docstrings (`"""docstring"""`)
+    - JSDoc/JavaDoc (`/** ... */`)
+    - Rust doc comments (`///`)
+    - Go/C# XML comments (`///`)
+    - Ruby/PHP doc comments
+  - **Tools**:
+    - `symbol_search`: Find symbol definitions and references with optional scope and documentation info
+    - `dependency_analyzer`: Analyze import relationships with enhanced path resolution
+    - `refactor`: Safely rename symbols across multiple files with preview support
+- `/new` command alias for `/clear` to start a new conversation
+- Todo completion check - agent is reminded to complete todos before finishing work
+- Improved error message when attempting to read a directory (suggests using `list_dir`)
+
+### Changed
+
+- Enhanced file vs folder detection with better guidance for the agent
+- Code intelligence tools now support 9 additional programming languages
+
 ## [1.3.2] - 2025-12-24
 
 ### Added

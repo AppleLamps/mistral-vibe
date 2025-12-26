@@ -59,6 +59,7 @@ from vibe.core.types import (
 from vibe.core.utils import (
     TOOL_ERROR_TAG,
     VIBE_STOP_EVENT_TAG,
+    VIBE_WARNING_TAG,
     CancellationReason,
     get_user_agent,
     get_user_cancellation_message,
@@ -280,9 +281,22 @@ class Agent:
         self._context_cache = (cache_key, context)
         return context
 
+    def _get_incomplete_todos(self) -> list:
+        """Get list of incomplete todos (not COMPLETED or CANCELLED)."""
+        try:
+            todo_tool = self.tool_manager.get("todo")
+            todos = todo_tool.state.todos
+            return [
+                t for t in todos
+                if t.status not in ("completed", "cancelled")
+            ]
+        except Exception:
+            return []
+
     async def _conversation_loop(self, user_msg: str) -> AsyncGenerator[BaseEvent]:
         self.messages.append(LLMMessage(role=Role.user, content=user_msg))
         self.stats.steps += 1
+        todo_reminder_sent = False
 
         try:
             should_break_loop = False
@@ -305,6 +319,27 @@ class Agent:
 
                 last_message = self.messages[-1]
                 should_break_loop = last_message.role != Role.tool
+
+                # Check for incomplete todos before breaking the loop
+                if should_break_loop and not todo_reminder_sent:
+                    incomplete_todos = self._get_incomplete_todos()
+                    if incomplete_todos:
+                        # Inject reminder about incomplete todos
+                        todo_list = "\n".join(
+                            f"- [{t.status}] {t.content}" for t in incomplete_todos
+                        )
+                        reminder = (
+                            f"<{VIBE_WARNING_TAG}>You have {len(incomplete_todos)} "
+                            f"incomplete todo(s). Please complete or cancel them "
+                            f"before finishing:\n{todo_list}</{VIBE_WARNING_TAG}>"
+                        )
+                        # Add reminder to last message to prompt agent to continue
+                        if last_message.content:
+                            last_message.content += f"\n\n{reminder}"
+                        else:
+                            last_message.content = reminder
+                        todo_reminder_sent = True
+                        should_break_loop = False  # Continue the loop
 
                 self._flush_new_messages()
 

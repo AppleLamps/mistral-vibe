@@ -171,7 +171,7 @@ class ReadFile(
         if not resolved_path.exists():
             raise ToolError(f"File not found at: {file_path}")
         if resolved_path.is_dir():
-            raise ToolError(f"Path is a directory, not a file: {file_path}")
+            raise ToolError(f"Path is a directory, not a file: {file_path}. Use list_dir tool to explore directory contents.")
 
     def _update_state_history(self, file_path: Path) -> None:
         self.state.recently_read_files.append(str(file_path.resolve()))
