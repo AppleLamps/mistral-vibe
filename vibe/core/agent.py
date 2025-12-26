@@ -697,46 +697,59 @@ class Agent:
         self._ensure_assistant_after_tools()
 
     def _fill_missing_tool_responses(self) -> None:
-        i = 1
-        while i < len(self.messages):  # noqa: PLR1702
+        """Fill in missing tool responses after assistant tool calls.
+
+        Optimized to O(n) by building a new list instead of using O(n) insertions.
+        """
+        if len(self.messages) < 2:
+            return
+
+        new_messages = []
+        i = 0
+
+        while i < len(self.messages):
             msg = self.messages[i]
+            new_messages.append(msg)
 
             if msg.role == "assistant" and msg.tool_calls:
                 expected_responses = len(msg.tool_calls)
 
                 if expected_responses > 0:
-                    actual_responses = 0
+                    # Collect actual tool responses that follow this assistant message
+                    actual_responses = []
                     j = i + 1
                     while j < len(self.messages) and self.messages[j].role == "tool":
-                        actual_responses += 1
+                        actual_responses.append(self.messages[j])
                         j += 1
 
-                    if actual_responses < expected_responses:
-                        insertion_point = i + 1 + actual_responses
+                    # Add the actual responses we found
+                    new_messages.extend(actual_responses)
 
-                        for call_idx in range(actual_responses, expected_responses):
-                            tool_call_data = msg.tool_calls[call_idx]
+                    # Add empty responses for any missing tool calls
+                    for call_idx in range(len(actual_responses), expected_responses):
+                        tool_call_data = msg.tool_calls[call_idx]
 
-                            empty_response = LLMMessage(
-                                role=Role.tool,
-                                tool_call_id=tool_call_data.id or "",
-                                name=(tool_call_data.function.name or "")
-                                if tool_call_data.function
-                                else "",
-                                content=str(
-                                    get_user_cancellation_message(
-                                        CancellationReason.TOOL_NO_RESPONSE
-                                    )
-                                ),
-                            )
+                        empty_response = LLMMessage(
+                            role=Role.tool,
+                            tool_call_id=tool_call_data.id or "",
+                            name=(tool_call_data.function.name or "")
+                            if tool_call_data.function
+                            else "",
+                            content=str(
+                                get_user_cancellation_message(
+                                    CancellationReason.TOOL_NO_RESPONSE
+                                )
+                            ),
+                        )
+                        new_messages.append(empty_response)
 
-                            self.messages.insert(insertion_point, empty_response)
-                            insertion_point += 1
-
-                    i = i + 1 + expected_responses
+                    # Skip past the tool responses we already added
+                    i = j
                     continue
 
             i += 1
+
+        self.messages = new_messages
 
     def _ensure_assistant_after_tools(self) -> None:
         MIN_MESSAGE_SIZE = 2
