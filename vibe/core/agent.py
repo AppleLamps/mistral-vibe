@@ -411,13 +411,20 @@ class Agent:
             error_msg = f"<{TOOL_ERROR_TAG}>{tool_instance.get_name()} failed: {exc}</{TOOL_ERROR_TAG}>"
             return (False, None, 0.0, error_msg)
 
+    # Tools that modify files and must be executed sequentially to prevent race conditions
+    _FILE_MODIFYING_TOOLS: frozenset[str] = frozenset({
+        "write_file",
+        "search_replace",
+    })
+
     async def _handle_tool_calls(
         self, resolved: ResolvedMessage
     ) -> AsyncGenerator[ToolCallEvent | ToolResultEvent]:
-        """Handle tool calls with concurrent execution when possible.
+        """Handle tool calls with smart concurrent execution.
 
-        Optimized to execute approved tools in parallel instead of sequentially.
-        This reduces total time from sum(all_tools) to max(slowest_tool) for independent tools.
+        File-modifying tools (write_file, search_replace) are executed sequentially
+        to prevent race conditions when multiple operations target the same file.
+        Read-only and other tools are executed in parallel for performance.
         """
         # Handle failed calls first
         for failed in resolved.failed_calls:
@@ -508,38 +515,48 @@ class Agent:
             self.stats.tool_calls_agreed += 1
             approved_tools.append((idx, tool_call, tool_instance, tool_call_id))
 
-        # Phase 2: Execute approved tools in parallel
+        # Phase 2: Execute approved tools with smart parallelization
+        # File-modifying tools run sequentially; others run in parallel
         if not any(approved_tools):
             return
 
-        # Create tasks for all approved tools
-        execution_tasks = []
-        task_indices = []
-        for item in approved_tools:
+        # Separate file-modifying tools from parallelizable tools
+        file_modifying_items: list[tuple[int, Any]] = []
+        parallel_items: list[tuple[int, Any]] = []
+
+        for i, item in enumerate(approved_tools):
             if item is None:
-                execution_tasks.append(None)
+                continue
+            _, tool_call, _, _ = item
+            if tool_call.tool_name in self._FILE_MODIFYING_TOOLS:
+                file_modifying_items.append((i, item))
             else:
-                idx, tool_call, tool_instance, tool_call_id = item
-                task = self._execute_single_tool(tool_instance, tool_call, tool_call_id)
-                execution_tasks.append(task)
-                task_indices.append(idx)
+                parallel_items.append((i, item))
 
-        # Execute approved tools concurrently
+        result_map: dict[int, tuple[bool, Any, float, str | None]] = {}
+
+        # Execute file-modifying tools sequentially to prevent race conditions
         try:
-            # Gather only non-None tasks
-            non_none_tasks = [t for t in execution_tasks if t is not None]
-            if non_none_tasks:
-                results = await asyncio.gather(*non_none_tasks, return_exceptions=True)
-            else:
-                results = []
+            for i, item in file_modifying_items:
+                idx, tool_call, tool_instance, tool_call_id = item
+                result = await self._execute_single_tool(
+                    tool_instance, tool_call, tool_call_id
+                )
+                if isinstance(result, (asyncio.CancelledError, KeyboardInterrupt)):
+                    raise result
+                result_map[i] = result
 
-            # Map results back to original indices
-            result_map = {}
-            result_idx = 0
-            for i, item in enumerate(approved_tools):
-                if item is not None:
-                    result_map[i] = results[result_idx]
-                    result_idx += 1
+            # Execute parallelizable tools concurrently
+            if parallel_items:
+                parallel_tasks = [
+                    self._execute_single_tool(item[2], item[1], item[3])
+                    for _, item in parallel_items
+                ]
+                parallel_results = await asyncio.gather(
+                    *parallel_tasks, return_exceptions=True
+                )
+                for (i, _), result in zip(parallel_items, parallel_results):
+                    result_map[i] = result
 
             # Phase 3: Emit results in original order
             for i, item in enumerate(approved_tools):
@@ -621,7 +638,7 @@ class Agent:
                     )
 
         except (asyncio.CancelledError, KeyboardInterrupt):
-            # Handle cancellation during parallel execution
+            # Handle cancellation during execution
             raise
 
     async def _chat(self, max_tokens: int | None = None) -> LLMChunk:
@@ -882,8 +899,69 @@ class Agent:
         self.tool_manager.reset_all()
         self._reset_session()
 
+    def _extract_session_state_for_compact(self) -> str:
+        """Extract important session state to preserve during compaction.
+
+        Gathers information about:
+        - Files modified during the session
+        - Recent tool execution results
+        - Any errors encountered
+        """
+        modified_files: set[str] = set()
+        recent_errors: list[str] = []
+        successful_tools: list[str] = []
+
+        # Scan messages for tool calls and their results
+        for msg in self.messages:
+            if msg.role == Role.tool and msg.content:
+                content = msg.content
+                tool_name = msg.name or "unknown"
+
+                # Check for file modifications
+                if tool_name in ("write_file", "search_replace"):
+                    # Extract file path from content if present
+                    if "file:" in content.lower():
+                        for line in content.split("\n"):
+                            if line.lower().startswith("file:"):
+                                file_path = line.split(":", 1)[-1].strip()
+                                if file_path:
+                                    modified_files.add(file_path)
+
+                # Track errors
+                if "<tool_error>" in content or "failed:" in content.lower():
+                    error_summary = content[:200] + "..." if len(content) > 200 else content
+                    recent_errors.append(f"{tool_name}: {error_summary}")
+                else:
+                    successful_tools.append(tool_name)
+
+        # Build context summary
+        context_parts: list[str] = []
+
+        if modified_files:
+            files_list = ", ".join(sorted(modified_files)[:10])
+            if len(modified_files) > 10:
+                files_list += f" (+{len(modified_files) - 10} more)"
+            context_parts.append(f"Files modified this session: {files_list}")
+
+        if recent_errors:
+            # Only include last 3 errors to avoid bloat
+            errors_summary = "; ".join(recent_errors[-3:])
+            context_parts.append(f"Recent errors: {errors_summary}")
+
+        if successful_tools:
+            # Summarize tool usage
+            tool_counts: dict[str, int] = {}
+            for tool in successful_tools:
+                tool_counts[tool] = tool_counts.get(tool, 0) + 1
+            tools_summary = ", ".join(f"{t}({c})" for t, c in sorted(tool_counts.items())[:5])
+            context_parts.append(f"Tools used: {tools_summary}")
+
+        context_parts.append(f"Session stats: {self.stats.tool_calls_succeeded} successful, {self.stats.tool_calls_failed} failed tool calls")
+
+        return "\n".join(context_parts) if context_parts else ""
+
     async def compact(self) -> str:
-        """Compact the conversation history."""
+        """Compact the conversation history while preserving important session state."""
         try:
             self._clean_message_history()
             await self.interaction_logger.save_interaction(
@@ -896,6 +974,9 @@ class Agent:
                     last_user_message = msg.content
                     break
 
+            # Extract session state before compaction
+            session_state = self._extract_session_state_for_compact()
+
             summary_request = UtilityPrompt.COMPACT.read()
             self.messages.append(LLMMessage(role=Role.user, content=summary_request))
             self.stats.steps += 1
@@ -907,9 +988,13 @@ class Agent:
                 )
             summary_content = summary_result.message.content or ""
 
+            # Append preserved session state
+            if session_state:
+                summary_content += f"\n\n## Session State (Preserved)\n{session_state}"
+
             if last_user_message:
                 summary_content += (
-                    f"\n\nLast request from user was: {last_user_message}"
+                    f"\n\n## Last User Request\n{last_user_message}"
                 )
 
             system_message = self.messages[0]
