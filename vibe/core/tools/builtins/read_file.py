@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, NamedTuple, final
 
@@ -85,8 +86,6 @@ class ReadFile(
         )
 
     def check_allowlist_denylist(self, args: ReadFileArgs) -> ToolPermission | None:
-        import fnmatch
-
         file_path = Path(args.path).expanduser()
         if not file_path.is_absolute():
             file_path = self.config.effective_workdir / file_path
@@ -128,7 +127,8 @@ class ReadFile(
                     if args.limit is not None and len(lines_to_return) >= args.limit:
                         break
 
-                    line_bytes = len(line.encode("utf-8"))
+                    # Fast path: ASCII lines don't need encoding to count bytes
+                    line_bytes = len(line) if line.isascii() else len(line.encode("utf-8"))
                     if bytes_read + line_bytes > self.config.max_read_bytes:
                         was_truncated = True
                         break
