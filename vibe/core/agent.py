@@ -145,6 +145,9 @@ class Agent:
             config.effective_workdir,
         )
 
+        # Cache for ConversationContext to avoid creating duplicate objects
+        self._context_cache: tuple[tuple, ConversationContext] | None = None
+
     @property
     def mode(self) -> AgentMode:
         return self._mode
@@ -241,9 +244,31 @@ class Agent:
                 pass
 
     def _get_context(self) -> ConversationContext:
-        return ConversationContext(
+        """Get conversation context with lightweight caching.
+
+        Avoids creating duplicate ConversationContext objects when the underlying
+        data hasn't changed. Uses a simple cache key based on messages length,
+        stats steps, and object identities.
+        """
+        # Create cache key from messages list, stats, and config state
+        cache_key = (
+            id(self.messages),
+            len(self.messages),
+            id(self.stats),
+            self.stats.steps,
+            id(self.config),
+        )
+
+        # Return cached context if key matches
+        if self._context_cache is not None and self._context_cache[0] == cache_key:
+            return self._context_cache[1]
+
+        # Create new context and cache it
+        context = ConversationContext(
             messages=self.messages, stats=self.stats, config=self.config
         )
+        self._context_cache = (cache_key, context)
+        return context
 
     async def _conversation_loop(self, user_msg: str) -> AsyncGenerator[BaseEvent]:
         self.messages.append(LLMMessage(role=Role.user, content=user_msg))

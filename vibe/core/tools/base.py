@@ -235,9 +235,12 @@ class BaseTool[
         return cast(type[ToolArgs], args_model), cast(type[ToolResult], result_model)
 
     @classmethod
+    @functools.lru_cache(maxsize=None)
     def get_parameters(cls) -> dict[str, Any]:
-        """Return a cleaned-up JSON-schema dict describing the arguments model
-        with which this concrete tool was parametrised.
+        """Return a cached JSON-schema dict describing the arguments model.
+
+        Cached since the schema is static for each tool class and expensive to generate.
+        This eliminates redundant Pydantic model introspection and schema generation.
         """
         args_model, _ = cls._get_tool_args_results()
         schema = args_model.model_json_schema()

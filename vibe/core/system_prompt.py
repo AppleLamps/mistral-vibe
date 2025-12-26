@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Generator
 import fnmatch
+from functools import lru_cache
 import html
 import os
 from pathlib import Path
@@ -494,11 +495,70 @@ def _get_available_skills_section(skill_manager: SkillManager | None) -> str:
     return "\n".join(lines)
 
 
+# Cache for get_universal_system_prompt to avoid expensive directory traversal
+_system_prompt_cache: dict[tuple, str] = {}
+
+
 def get_universal_system_prompt(
     tool_manager: ToolManager,
     config: VibeConfig,
     skill_manager: SkillManager | None = None,
 ) -> str:
+    """Generate universal system prompt with caching.
+
+    Caches the expensive directory traversal and git operations based on
+    the state of tools, config, skills, and working directory.
+    """
+    # Create cache key from relevant state
+    active_tools = get_active_tool_classes(tool_manager, config)
+    tool_names = tuple(sorted(tool_class.get_name() for tool_class in active_tools))
+    skill_names = (
+        tuple(sorted(skill_manager.list_skills().keys()))
+        if skill_manager
+        else ()
+    )
+
+    # Key includes: tools, config fields, skills, workdir
+    cache_key = (
+        tool_names,
+        config.system_prompt,
+        config.include_commit_signature,
+        config.include_model_info,
+        config.active_model,
+        config.include_prompt_detail,
+        config.instructions,
+        config.include_project_context,
+        str(config.effective_workdir),
+        skill_names,
+    )
+
+    # Return cached result if available
+    if cache_key in _system_prompt_cache:
+        return _system_prompt_cache[cache_key]
+
+    # Generate system prompt (expensive operations below)
+    result = _generate_system_prompt_uncached(
+        tool_manager, config, skill_manager, active_tools
+    )
+
+    # Cache the result
+    _system_prompt_cache[cache_key] = result
+
+    # Limit cache size to prevent unbounded growth
+    if len(_system_prompt_cache) > 100:
+        # Remove oldest entry (FIFO eviction)
+        _system_prompt_cache.pop(next(iter(_system_prompt_cache)))
+
+    return result
+
+
+def _generate_system_prompt_uncached(
+    tool_manager: ToolManager,
+    config: VibeConfig,
+    skill_manager: SkillManager | None,
+    active_tools: list,
+) -> str:
+    """Generate system prompt without caching (internal helper)."""
     sections = [config.system_prompt]
 
     if config.include_commit_signature:
@@ -510,7 +570,7 @@ def get_universal_system_prompt(
     if config.include_prompt_detail:
         sections.append(_get_os_system_prompt())
         tool_prompts = []
-        active_tools = get_active_tool_classes(tool_manager, config)
+        # Use pre-computed active_tools to avoid redundant call
         for tool_class in active_tools:
             if prompt := tool_class.get_tool_prompt():
                 tool_prompts.append(prompt)
