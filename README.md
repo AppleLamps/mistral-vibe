@@ -35,6 +35,7 @@ curl -LsSf https://mistral.ai/vibe/install.sh | bash
 **Windows**
 
 First, install uv
+
 ```bash
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
