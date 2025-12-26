@@ -499,6 +499,39 @@ def _get_available_skills_section(skill_manager: SkillManager | None) -> str:
 _system_prompt_cache: dict[tuple, str] = {}
 
 
+def _get_cache_invalidation_keys(workdir: Path) -> tuple[int, str]:
+    """Get cache invalidation keys for gitignore and git branch.
+
+    Returns (gitignore_mtime_ns, git_branch) to detect changes that should
+    invalidate the cached system prompt.
+    """
+    # Get .gitignore modification time
+    gitignore_mtime: int = 0
+    gitignore_path = workdir / ".gitignore"
+    try:
+        if gitignore_path.exists():
+            gitignore_mtime = gitignore_path.stat().st_mtime_ns
+    except OSError:
+        pass
+
+    # Get current git branch (fast operation)
+    git_branch: str = ""
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=workdir,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+        if result.returncode == 0:
+            git_branch = result.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    return (gitignore_mtime, git_branch)
+
+
 def get_universal_system_prompt(
     tool_manager: ToolManager,
     config: VibeConfig,
@@ -507,7 +540,8 @@ def get_universal_system_prompt(
     """Generate universal system prompt with caching.
 
     Caches the expensive directory traversal and git operations based on
-    the state of tools, config, skills, and working directory.
+    the state of tools, config, skills, working directory, gitignore changes,
+    and current git branch.
     """
     # Create cache key from relevant state
     active_tools = get_active_tool_classes(tool_manager, config)
@@ -518,7 +552,10 @@ def get_universal_system_prompt(
         else ()
     )
 
-    # Key includes: tools, config fields, skills, workdir
+    # Get cache invalidation keys for git state
+    gitignore_mtime, git_branch = _get_cache_invalidation_keys(config.effective_workdir)
+
+    # Key includes: tools, config fields, skills, workdir, git state
     cache_key = (
         tool_names,
         config.system_prompt,
@@ -530,6 +567,8 @@ def get_universal_system_prompt(
         config.include_project_context,
         str(config.effective_workdir),
         skill_names,
+        gitignore_mtime,
+        git_branch,
     )
 
     # Return cached result if available

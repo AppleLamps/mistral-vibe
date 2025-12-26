@@ -59,6 +59,14 @@ class SearchReplaceConfig(BaseToolConfig):
     max_content_size: int = 100_000
     create_backup: bool = False
     fuzzy_threshold: float = 0.9
+    auto_apply_fuzzy: bool = Field(
+        default=False,
+        description="Automatically apply fuzzy matches above the threshold instead of failing",
+    )
+    auto_apply_min_similarity: float = Field(
+        default=0.95,
+        description="Minimum similarity required for auto-applying fuzzy matches (0.0-1.0)",
+    )
 
 
 class SearchReplaceState(BaseToolState):
@@ -115,7 +123,9 @@ class SearchReplace(
             original_content,
             search_replace_blocks,
             file_path,
-            self.config.fuzzy_threshold,
+            fuzzy_threshold=self.config.fuzzy_threshold,
+            auto_apply_fuzzy=self.config.auto_apply_fuzzy,
+            auto_apply_min_similarity=self.config.auto_apply_min_similarity,
         )
 
         if block_result.errors:
@@ -231,6 +241,8 @@ class SearchReplace(
         blocks: list[SearchReplaceBlock],
         filepath: Path,
         fuzzy_threshold: float = 0.9,
+        auto_apply_fuzzy: bool = False,
+        auto_apply_min_similarity: float = 0.95,
     ) -> BlockApplyResult:
         applied = 0
         errors: list[str] = []
@@ -239,6 +251,28 @@ class SearchReplace(
 
         for i, (search, replace) in enumerate(blocks, 1):
             if search not in current_content:
+                # Try fuzzy matching
+                best_match = SearchReplace._find_best_fuzzy_match(
+                    current_content, search, fuzzy_threshold
+                )
+
+                # Check if we can auto-apply the fuzzy match
+                if (
+                    auto_apply_fuzzy
+                    and best_match is not None
+                    and best_match.similarity >= auto_apply_min_similarity
+                ):
+                    # Auto-apply the fuzzy match
+                    current_content = current_content.replace(best_match.text, replace, 1)
+                    applied += 1
+                    similarity_pct = best_match.similarity * 100
+                    warnings.append(
+                        f"Block {i}: Auto-applied fuzzy match (similarity: {similarity_pct:.1f}%) "
+                        f"at lines {best_match.start_line}-{best_match.end_line}"
+                    )
+                    continue
+
+                # No auto-apply - report error with context
                 context = SearchReplace._find_search_context(current_content, search)
                 fuzzy_context = SearchReplace._find_fuzzy_match_context(
                     current_content, search, fuzzy_threshold
@@ -252,6 +286,11 @@ class SearchReplace(
 
                 if fuzzy_context:
                     error_msg += f"\n{fuzzy_context}"
+                    if not auto_apply_fuzzy:
+                        error_msg += (
+                            "\n\nTip: Enable 'auto_apply_fuzzy' in search_replace config "
+                            "to automatically apply high-similarity fuzzy matches."
+                        )
 
                 error_msg += (
                     "\nDebugging tips:\n"

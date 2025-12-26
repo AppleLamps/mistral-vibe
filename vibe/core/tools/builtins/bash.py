@@ -161,6 +161,7 @@ class BashResult(BaseModel):
     stdout: str
     stderr: str
     returncode: int
+    correction_hint: str | None = None
 
 
 class Bash(BaseTool[BashArgs, BashResult, BashToolConfig, BaseToolState]):
@@ -212,16 +213,89 @@ class Bash(BaseTool[BashArgs, BashResult, BashToolConfig, BaseToolState]):
         return ToolError(f"Command timed out after {timeout}s: {command!r}")
 
     @final
+    def _generate_correction_hint(
+        self, command: str, stderr: str, returncode: int
+    ) -> str:
+        """Generate helpful correction hints based on common error patterns."""
+        hints: list[str] = []
+        stderr_lower = stderr.lower()
+
+        # Command not found errors
+        if "command not found" in stderr_lower or "not recognized" in stderr_lower:
+            hints.append("Check if the command is installed and in PATH")
+            hints.append("Try using the full path to the executable")
+            if is_windows():
+                hints.append("Use 'where <command>' to check if it exists")
+            else:
+                hints.append("Use 'which <command>' to check if it exists")
+
+        # Permission denied
+        elif "permission denied" in stderr_lower:
+            hints.append("Check file/directory permissions")
+            if not is_windows():
+                hints.append("You may need to use 'chmod' to change permissions")
+
+        # File/directory not found
+        elif "no such file or directory" in stderr_lower or "cannot find" in stderr_lower:
+            hints.append("Verify the file/directory path exists")
+            hints.append("Check for typos in the path")
+            hints.append("Use 'ls' or 'dir' to list directory contents")
+
+        # Git errors
+        elif "not a git repository" in stderr_lower:
+            hints.append("Ensure you're in a git repository directory")
+            hints.append("Run 'git init' to initialize a new repository")
+
+        # Python/pip errors
+        elif "modulenotfounderror" in stderr_lower or "no module named" in stderr_lower:
+            hints.append("Install the missing package with pip/uv")
+            hints.append("Check if you're using the correct Python environment")
+
+        # npm/node errors
+        elif "enoent" in stderr_lower and "npm" in command.lower():
+            hints.append("Run 'npm install' to install dependencies")
+            hints.append("Check if package.json exists in the directory")
+
+        # Connection errors
+        elif "connection refused" in stderr_lower or "could not resolve host" in stderr_lower:
+            hints.append("Check network connectivity")
+            hints.append("Verify the host/port is correct and accessible")
+
+        # Default hints based on return code
+        if not hints:
+            if returncode == 1:
+                hints.append("General error - check command syntax")
+            elif returncode == 2:
+                hints.append("Misuse of shell command - verify arguments")
+            elif returncode == 126:
+                hints.append("Command not executable - check permissions")
+            elif returncode == 127:
+                hints.append("Command not found - verify it's installed")
+            elif returncode == 128:
+                hints.append("Invalid exit argument")
+            elif returncode > 128:
+                signal_num = returncode - 128
+                hints.append(f"Command killed by signal {signal_num}")
+
+        if hints:
+            return "Correction suggestions:\n- " + "\n- ".join(hints)
+        return ""
+
+    @final
     def _build_result(
         self, *, command: str, stdout: str, stderr: str, returncode: int
     ) -> BashResult:
         if returncode != 0:
+            correction_hint = self._generate_correction_hint(command, stderr, returncode)
+
             error_msg = f"Command failed: {command!r}\n"
             error_msg += f"Return code: {returncode}"
             if stderr:
                 error_msg += f"\nStderr: {stderr}"
             if stdout:
                 error_msg += f"\nStdout: {stdout}"
+            if correction_hint:
+                error_msg += f"\n\n{correction_hint}"
             raise ToolError(error_msg.strip())
 
         return BashResult(stdout=stdout, stderr=stderr, returncode=returncode)

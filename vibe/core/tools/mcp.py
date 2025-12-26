@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -11,6 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState, ToolError
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay
+
+# MCP connection retry settings
+MCP_MAX_RETRIES = 3
+MCP_INITIAL_DELAY = 0.5
+MCP_BACKOFF_FACTOR = 2.0
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolCallEvent, ToolResultEvent
@@ -115,12 +121,36 @@ async def call_tool_http(
     arguments: dict[str, Any],
     *,
     headers: dict[str, str] | None = None,
+    max_retries: int = MCP_MAX_RETRIES,
 ) -> MCPToolResult:
-    async with streamablehttp_client(url, headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            result = await session.call_tool(tool_name, arguments)
-            return _parse_call_result(url, tool_name, result)
+    """Call an MCP tool via HTTP with automatic retry on connection failures.
+
+    Implements exponential backoff for transient connection errors.
+    """
+    last_error: Exception | None = None
+    delay = MCP_INITIAL_DELAY
+
+    for attempt in range(max_retries):
+        try:
+            async with streamablehttp_client(url, headers=headers) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool_name, arguments)
+                    return _parse_call_result(url, tool_name, result)
+        except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                await asyncio.sleep(delay)
+                delay *= MCP_BACKOFF_FACTOR
+            continue
+        except Exception:
+            # Non-retryable errors should propagate immediately
+            raise
+
+    # All retries exhausted
+    raise ConnectionError(
+        f"MCP server at {url} unavailable after {max_retries} attempts: {last_error}"
+    ) from last_error
 
 
 def create_mcp_http_proxy_tool_class(
@@ -204,14 +234,41 @@ async def list_tools_stdio(command: list[str]) -> list[RemoteTool]:
 
 
 async def call_tool_stdio(
-    command: list[str], tool_name: str, arguments: dict[str, Any]
+    command: list[str],
+    tool_name: str,
+    arguments: dict[str, Any],
+    max_retries: int = MCP_MAX_RETRIES,
 ) -> MCPToolResult:
-    params = StdioServerParameters(command=command[0], args=command[1:])
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            result = await session.call_tool(tool_name, arguments)
-            return _parse_call_result("stdio:" + " ".join(command), tool_name, result)
+    """Call an MCP tool via stdio with automatic retry on connection failures.
+
+    Implements exponential backoff for transient process/connection errors.
+    """
+    last_error: Exception | None = None
+    delay = MCP_INITIAL_DELAY
+    server_id = "stdio:" + " ".join(command)
+
+    for attempt in range(max_retries):
+        try:
+            params = StdioServerParameters(command=command[0], args=command[1:])
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool_name, arguments)
+                    return _parse_call_result(server_id, tool_name, result)
+        except (ConnectionError, OSError, asyncio.TimeoutError, ProcessLookupError) as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                await asyncio.sleep(delay)
+                delay *= MCP_BACKOFF_FACTOR
+            continue
+        except Exception:
+            # Non-retryable errors should propagate immediately
+            raise
+
+    # All retries exhausted
+    raise ConnectionError(
+        f"MCP stdio server '{command[0]}' unavailable after {max_retries} attempts: {last_error}"
+    ) from last_error
 
 
 def create_mcp_stdio_proxy_tool_class(
