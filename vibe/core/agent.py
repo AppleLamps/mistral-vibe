@@ -21,6 +21,7 @@ from vibe.core.middleware import (
     MiddlewareAction,
     MiddlewarePipeline,
     MiddlewareResult,
+    ModeTransitionMiddleware,
     PlanModeMiddleware,
     PriceLimitMiddleware,
     ResetReason,
@@ -118,6 +119,7 @@ class Agent:
         self.message_observer = message_observer
         self._last_observed_message_index: int = 0
         self.middleware_pipeline = MiddlewarePipeline()
+        self._mode_transition_middleware: ModeTransitionMiddleware | None = None
         self.enable_streaming = enable_streaming
         self._setup_middleware()
 
@@ -205,6 +207,10 @@ class Agent:
                 )
 
         self.middleware_pipeline.add(PlanModeMiddleware(lambda: self._mode))
+
+        # Mode transition middleware to notify model when exiting plan mode
+        self._mode_transition_middleware = ModeTransitionMiddleware(lambda: self._mode)
+        self.middleware_pipeline.add(self._mode_transition_middleware)
 
     async def _handle_middleware_result(
         self, result: MiddlewareResult
@@ -1067,12 +1073,18 @@ class Agent:
     async def switch_mode(self, new_mode: AgentMode) -> None:
         if new_mode == self._mode:
             return
+
+        old_mode = self._mode
         new_config = VibeConfig.load(
             workdir=self.config.workdir, **new_mode.config_overrides
         )
 
         await self.reload_with_initial_messages(config=new_config)
         self._mode = new_mode
+
+        # Notify middleware about mode transition (especially for plan -> other transitions)
+        if self._mode_transition_middleware:
+            self._mode_transition_middleware.notify_mode_change(old_mode, new_mode)
 
     async def reload_with_initial_messages(
         self,

@@ -231,6 +231,14 @@ class ProjectContextProvider:
         except Exception as e:
             lines.append(f"Error building structure: {e}")
 
+        # Handle empty directory case explicitly
+        if not lines:
+            return (
+                f"{header}(empty directory)\n\n"
+                "NOTE: This directory contains no files or folders. "
+                "You are starting from scratch. Create new files as needed using the write_file tool."
+            )
+
         structure = header + "\n".join(lines)
 
         if self._file_count >= self.config.max_files:
