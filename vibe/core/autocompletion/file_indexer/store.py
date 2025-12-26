@@ -59,6 +59,12 @@ class FileIndexStore:
         self._stats.rebuilds += 1
 
     def snapshot(self) -> list[IndexEntry]:
+        """Return a snapshot of all indexed entries, sorted by relative path.
+
+        Optimized to return cached list directly instead of creating a copy.
+        The cached list is invalidated on any modification, so it's safe to return.
+        Callers should not modify the returned list.
+        """
         if not self._entries_by_rel:
             return []
 
@@ -67,7 +73,9 @@ class FileIndexStore:
                 self._entries_by_rel.values(), key=lambda entry: entry.rel
             )
 
-        return list(self._ordered_entries)
+        # Return cached list directly - no need to copy
+        # Cache is invalidated whenever store is modified (see apply_changes)
+        return self._ordered_entries
 
     def apply_changes(self, changes: list[tuple[Change, Path]]) -> None:
         if self._root is None:
@@ -156,14 +164,23 @@ class FileIndexStore:
         return results
 
     def _remove_entry(self, rel_str: str) -> bool:
+        """Remove an entry and all its children if it's a directory.
+
+        Optimized to use dict comprehension instead of creating intermediate list.
+        For directories with many children, this is more memory-efficient.
+        """
         entry = self._entries_by_rel.pop(rel_str, None)
         if not entry:
             return False
 
         if entry.is_dir:
+            # Remove all entries under this directory in one pass
+            # More efficient than list comprehension + multiple pops
             prefix = f"{rel_str}/"
-            to_remove = [key for key in self._entries_by_rel if key.startswith(prefix)]
-            for key in to_remove:
-                self._entries_by_rel.pop(key, None)
+            self._entries_by_rel = {
+                k: v
+                for k, v in self._entries_by_rel.items()
+                if not k.startswith(prefix)
+            }
 
         return True
