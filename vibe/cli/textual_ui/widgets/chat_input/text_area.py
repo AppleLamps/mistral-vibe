@@ -163,66 +163,95 @@ class ChatTextArea(TextArea):
         self.post_message(self.HistoryNext(self._history_prefix))
         return True
 
-    async def _on_key(self, event: events.Key) -> None:  # noqa: PLR0911
-        self._mark_cursor_moved_if_needed()
-
+    def _handle_completion_event(self, event: events.Key) -> bool:
         manager = self._completion_manager
-        if manager:
-            match manager.on_key(
-                event, self.get_full_text(), self._get_full_cursor_offset()
-            ):
-                case CompletionResult.HANDLED:
-                    event.prevent_default()
-                    event.stop()
-                    return
-                case CompletionResult.SUBMIT:
-                    event.prevent_default()
-                    event.stop()
-                    value = self.get_full_text().strip()
-                    if value:
-                        self._reset_prefix()
-                        self.post_message(self.Submitted(value))
-                    return
+        if not manager:
+            return False
 
-        if event.key == "enter":
-            event.prevent_default()
-            event.stop()
-            value = self.get_full_text().strip()
-            if value:
-                self._reset_prefix()
-                self.post_message(self.Submitted(value))
-            return
-
-        if event.key == "shift+enter":
-            event.prevent_default()
-            event.stop()
-            return
-
-        if (
-            event.character
-            and event.character in self.MODE_CHARACTERS
-            and not self.text
-            and self._input_mode == self.DEFAULT_MODE
+        match manager.on_key(
+            event, self.get_full_text(), self._get_full_cursor_offset()
         ):
-            self._set_mode(event.character)
-            event.prevent_default()
-            event.stop()
-            return
+            case CompletionResult.HANDLED:
+                event.prevent_default()
+                event.stop()
+                return True
+            case CompletionResult.SUBMIT:
+                event.prevent_default()
+                event.stop()
+                value = self.get_full_text().strip()
+                if value:
+                    self._reset_prefix()
+                    self.post_message(self.Submitted(value))
+                return True
+        return False
 
-        if event.key == "backspace" and self._should_reset_mode_on_backspace():
-            self._set_mode(self.DEFAULT_MODE)
-            event.prevent_default()
-            event.stop()
-            return
+    def _handle_submit_event(self, event: events.Key) -> bool:
+        if event.key != "enter":
+            return False
+        event.prevent_default()
+        event.stop()
+        value = self.get_full_text().strip()
+        if value:
+            self._reset_prefix()
+            self.post_message(self.Submitted(value))
+        return True
 
+    def _handle_shift_enter_event(self, event: events.Key) -> bool:
+        if event.key != "shift+enter":
+            return False
+        event.prevent_default()
+        event.stop()
+        return True
+
+    def _handle_mode_character_event(self, event: events.Key) -> bool:
+        if (
+            not event.character
+            or event.character not in self.MODE_CHARACTERS
+            or self.text
+            or self._input_mode != self.DEFAULT_MODE
+        ):
+            return False
+
+        self._set_mode(event.character)
+        event.prevent_default()
+        event.stop()
+        return True
+
+    def _handle_backspace_event(self, event: events.Key) -> bool:
+        if event.key != "backspace" or not self._should_reset_mode_on_backspace():
+            return False
+        self._set_mode(self.DEFAULT_MODE)
+        event.prevent_default()
+        event.stop()
+        return True
+
+    def _handle_history_event(self, event: events.Key) -> bool:
         if event.key == "up" and self._handle_history_up():
             event.prevent_default()
             event.stop()
-            return
-
+            return True
         if event.key == "down" and self._handle_history_down():
             event.prevent_default()
             event.stop()
+            return True
+        return False
+
+    async def _on_key(self, event: events.Key) -> None:
+        self._mark_cursor_moved_if_needed()
+
+        handled = self._handle_completion_event(event)
+        if not handled:
+            handled = self._handle_submit_event(event)
+        if not handled:
+            handled = self._handle_shift_enter_event(event)
+        if not handled:
+            handled = self._handle_mode_character_event(event)
+        if not handled:
+            handled = self._handle_backspace_event(event)
+        if not handled:
+            handled = self._handle_history_event(event)
+
+        if handled:
             return
 
         await super()._on_key(event)

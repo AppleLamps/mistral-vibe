@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+import hashlib
 import importlib.util
 import inspect
 from logging import getLogger
@@ -10,7 +11,7 @@ import sys
 import traceback
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from vibe.core.paths.config_paths import resolve_local_tools_dir
 from vibe.core.paths.global_paths import DEFAULT_TOOL_DIR, GLOBAL_TOOLS_DIR
@@ -31,7 +32,7 @@ class MCPServerStatus(BaseModel):
     name: str
     transport: str
     registered_tools: int = 0
-    errors: list[str] = []
+    errors: list[str] = Field(default_factory=list)
 
 
 def _format_exception_line(exc: BaseException) -> str:
@@ -101,7 +102,10 @@ class ToolManager:
                     continue
 
                 stem = re.sub(r"[^0-9A-Za-z_]", "_", path.stem) or "mod"
-                module_name = f"vibe_tools_discovered_{stem}"
+                digest = hashlib.blake2s(
+                    str(path.resolve()).encode("utf-8"), digest_size=6
+                ).hexdigest()
+                module_name = f"vibe_tools_discovered_{stem}_{digest}"
 
                 spec = importlib.util.spec_from_file_location(module_name, path)
                 if spec is None or spec.loader is None:

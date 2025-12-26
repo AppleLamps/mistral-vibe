@@ -183,11 +183,16 @@ class SearchReplace(
         if not content:
             raise ToolError("Empty content provided")
 
-        project_root = self.config.effective_workdir
+        project_root = self.config.effective_workdir.resolve()
         file_path = Path(file_path_str).expanduser()
         if not file_path.is_absolute():
             file_path = project_root / file_path
         file_path = file_path.resolve()
+
+        try:
+            file_path.relative_to(project_root)
+        except ValueError:
+            raise ToolError(f"Cannot edit outside project directory: {file_path}")
 
         if not file_path.exists():
             raise ToolError(f"File does not exist: {file_path}")
@@ -345,7 +350,7 @@ class SearchReplace(
 
     @final
     @staticmethod
-    def _find_best_fuzzy_match(  # noqa: PLR0914
+    def _find_best_fuzzy_match(
         content: str, search_text: str, threshold: float = 0.9
     ) -> FuzzyMatch | None:
         content_lines = content.split("\n")
@@ -355,44 +360,68 @@ class SearchReplace(
         if window_size == 0:
             return None
 
+        candidate_starts = SearchReplace._collect_fuzzy_candidate_starts(
+            content_lines, search_lines, window_size
+        )
+        if not candidate_starts:
+            return None
+
+        return SearchReplace._select_best_fuzzy_match(
+            content_lines, search_text, window_size, candidate_starts, threshold
+        )
+
+    @final
+    @staticmethod
+    def _collect_fuzzy_candidate_starts(
+        content_lines: list[str],
+        search_lines: list[str],
+        window_size: int,
+        spread: int = 5,
+    ) -> set[int]:
         non_empty_search = [line for line in search_lines if line.strip()]
         if not non_empty_search:
-            return None
+            return set()
 
         first_anchor = non_empty_search[0]
         last_anchor = (
             non_empty_search[-1] if len(non_empty_search) > 1 else first_anchor
         )
 
-        candidate_starts = set()
-        spread = 5
-
+        candidate_starts: set[int] = set()
         for i, line in enumerate(content_lines):
             if first_anchor in line or last_anchor in line:
                 start_min = max(0, i - spread)
                 start_max = min(len(content_lines) - window_size + 1, i + spread + 1)
-                for s in range(start_min, start_max):
-                    candidate_starts.add(s)
+                candidate_starts.update(range(start_min, start_max))
 
         if not candidate_starts:
             max_positions = min(len(content_lines) - window_size + 1, 100)
             candidate_starts = set(range(0, max_positions))
 
-        best_match = None
-        best_similarity = 0.0
+        return candidate_starts
 
+    @final
+    @staticmethod
+    def _select_best_fuzzy_match(
+        content_lines: list[str],
+        search_text: str,
+        window_size: int,
+        candidate_starts: set[int],
+        threshold: float,
+    ) -> FuzzyMatch | None:
+        best_match: FuzzyMatch | None = None
         for start in candidate_starts:
             end = start + window_size
             window_text = "\n".join(content_lines[start:end])
 
-            matcher = difflib.SequenceMatcher(None, search_text, window_text)
-            similarity = matcher.ratio()
+            similarity = difflib.SequenceMatcher(None, search_text, window_text).ratio()
+            if similarity < threshold:
+                continue
 
-            if similarity >= threshold and similarity > best_similarity:
-                best_similarity = similarity
+            if best_match is None or similarity > best_match.similarity:
                 best_match = FuzzyMatch(
                     similarity=similarity,
-                    start_line=start + 1,  # 1-based line numbers
+                    start_line=start + 1,
                     end_line=end,
                     text=window_text,
                 )

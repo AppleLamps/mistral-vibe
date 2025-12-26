@@ -155,14 +155,18 @@ class ReadFile(
             raise ToolError("Limit, if provided, must be a positive number")
 
     def _validate_path(self, file_path: Path) -> None:
+        project_root = self.config.effective_workdir.resolve()
         try:
             resolved_path = file_path.resolve()
         except ValueError:
+            raise ToolError(f"Invalid file path: {file_path}")
+
+        try:
+            resolved_path.relative_to(project_root)
+        except ValueError:
             raise ToolError(
-                f"Security error: Cannot read path '{file_path}' outside of the project directory '{self.config.effective_workdir}'."
+                f"Cannot read outside project directory: {resolved_path}"
             )
-        except FileNotFoundError:
-            raise ToolError(f"File not found at: {file_path}")
 
         if not resolved_path.exists():
             raise ToolError(f"File not found at: {file_path}")

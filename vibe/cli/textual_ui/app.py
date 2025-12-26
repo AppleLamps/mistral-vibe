@@ -79,6 +79,7 @@ class BottomApp(StrEnum):
 class VibeApp(App):
     ENABLE_COMMAND_PALETTE = False
     CSS_PATH = "app.tcss"
+    ESCAPE_DOUBLE_TAP_SECONDS: ClassVar[float] = 0.2
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+c", "clear_quit", "Quit", show=False),
@@ -1085,7 +1086,8 @@ class VibeApp(App):
         if (
             self._current_bottom_app == BottomApp.Input
             and self._last_escape_time is not None
-            and (current_time - self._last_escape_time) < 0.2  # noqa: PLR2004
+            and (current_time - self._last_escape_time)
+            < self.ESCAPE_DOUBLE_TAP_SECONDS
         ):
             try:
                 input_widget = self.query_one(ChatInputContainer)
