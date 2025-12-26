@@ -639,6 +639,8 @@ class VibeApp(App):
             self._loading_widget = None
             self._hide_todo_area()
             await self._finalize_current_streaming_message()
+            if self.event_handler:
+                self.event_handler.reset_content_tracking()
 
     async def _interrupt_agent(self) -> None:
         interrupting_agent_init = bool(
@@ -670,6 +672,7 @@ class VibeApp(App):
         if self.event_handler:
             self.event_handler.stop_current_tool_call()
             self.event_handler.stop_current_compact()
+            self.event_handler.reset_content_tracking()
 
         self._agent_running = False
         loading_area = self.query_one("#loading-area-content")

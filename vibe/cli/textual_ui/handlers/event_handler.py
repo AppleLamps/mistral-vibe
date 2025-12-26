@@ -131,20 +131,51 @@ class EventHandler:
 
     def _detect_content_status(self, content: str) -> str | None:
         """Detect content type and return appropriate status text."""
-        # Check for code blocks
+        content_lower = content.lower()
+
+        # Check for code blocks (highest priority)
         if self.CODE_BLOCK_PATTERN in content:
+            # Try to detect specific languages
+            if "```python" in content_lower or "```py" in content_lower:
+                return "Writing Python"
+            elif "```javascript" in content_lower or "```js" in content_lower or "```typescript" in content_lower or "```ts" in content_lower:
+                return "Writing JavaScript"
+            elif "```rust" in content_lower:
+                return "Writing Rust"
+            elif "```go" in content_lower:
+                return "Writing Go"
+            elif "```bash" in content_lower or "```shell" in content_lower or "```sh" in content_lower:
+                return "Writing script"
             return "Writing code"
 
-        # Check for code-like content
+        # Check for analysis/investigation indicators
+        analysis_indicators = ("let me check", "looking at", "examining", "investigating", "analyzing", "i see that", "i notice")
+        for indicator in analysis_indicators:
+            if indicator in content_lower:
+                return "Analyzing"
+
+        # Check for explanation indicators
+        explanation_indicators = ("this means", "because", "the reason", "this is", "here's what", "explanation")
+        for indicator in explanation_indicators:
+            if indicator in content_lower:
+                return "Explaining"
+
+        # Check for planning indicators
+        planning_indicators = ("step ", "1.", "2.", "3.", "first,", "plan:", "approach", "i'll ", "i will ", "let me ")
+        for indicator in planning_indicators:
+            if indicator in content_lower:
+                return "Planning"
+
+        # Check for code-like content (function/class definitions)
         for indicator in self.CODE_INDICATORS:
             if indicator in content:
                 return "Generating code"
 
-        # Check for planning indicators
-        planning_indicators = ("Step ", "1.", "First,", "Plan:", "approach")
-        for indicator in planning_indicators:
-            if indicator in content:
-                return "Planning"
+        # Check for summary indicators
+        summary_indicators = ("in summary", "to summarize", "overall", "in conclusion")
+        for indicator in summary_indicators:
+            if indicator in content_lower:
+                return "Summarizing"
 
         return None
 

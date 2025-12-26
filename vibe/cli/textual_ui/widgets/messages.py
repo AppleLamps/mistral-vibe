@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from textual.app import ComposeResult
@@ -8,6 +9,32 @@ from textual.widgets import Markdown, Static
 from textual.widgets._markdown import MarkdownStream
 
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
+
+
+# Maximum lines to show in a code block before truncating
+MAX_CODE_BLOCK_LINES = 25
+CODE_BLOCK_PATTERN = re.compile(r"(```[\w]*\n)(.*?)(```)", re.DOTALL)
+
+
+def _truncate_code_block(match: re.Match) -> str:
+    """Truncate a code block if it exceeds MAX_CODE_BLOCK_LINES."""
+    opener = match.group(1)  # ```lang\n
+    code = match.group(2)
+    closer = match.group(3)  # ```
+
+    lines = code.split("\n")
+    if len(lines) <= MAX_CODE_BLOCK_LINES:
+        return match.group(0)  # Return unchanged
+
+    truncated_lines = lines[:MAX_CODE_BLOCK_LINES]
+    remaining = len(lines) - MAX_CODE_BLOCK_LINES
+    truncated_lines.append(f"\n... ({remaining} more lines truncated)")
+    return opener + "\n".join(truncated_lines) + "\n" + closer
+
+
+def truncate_code_blocks(content: str) -> str:
+    """Truncate all code blocks in content that exceed the line limit."""
+    return CODE_BLOCK_PATTERN.sub(_truncate_code_block, content)
 
 
 class NonSelectableStatic(Static):
@@ -104,9 +131,12 @@ class StreamingMessageBase(Static):
 
 
 class AssistantMessage(StreamingMessageBase):
+    """Assistant message with automatic code block truncation."""
+
     def __init__(self, content: str) -> None:
         super().__init__(content)
         self.add_class("assistant-message")
+        self._pending_content: str = ""  # Buffer for incomplete code blocks
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="assistant-message-container"):
@@ -115,6 +145,50 @@ class AssistantMessage(StreamingMessageBase):
                 markdown = Markdown("")
                 self._markdown = markdown
                 yield markdown
+
+    async def append_content(self, content: str) -> None:
+        """Append content with code block truncation for completed blocks."""
+        if not content:
+            return
+
+        self._content += content
+        self._pending_content += content
+
+        # Check if we have any complete code blocks to process
+        # Only process when we see a closing ``` that's not an opener
+        if "```" in self._pending_content:
+            # Count code block markers
+            parts = self._pending_content.split("```")
+            # If odd number of parts, we have complete blocks
+            # parts: [before, code1, between, code2, ...] - odd = all closed
+            if len(parts) % 2 == 1 and len(parts) > 1:
+                # We have complete code blocks - truncate and write
+                truncated = truncate_code_blocks(self._pending_content)
+                if self._should_write_content():
+                    stream = self._ensure_stream()
+                    await stream.write(truncated)
+                self._pending_content = ""
+                return
+
+        # No complete code blocks yet - check if we're inside one
+        code_markers = self._pending_content.count("```")
+        if code_markers % 2 == 0:
+            # Not inside a code block, safe to write
+            if self._should_write_content():
+                stream = self._ensure_stream()
+                await stream.write(self._pending_content)
+            self._pending_content = ""
+
+    async def stop_stream(self) -> None:
+        """Stop stream and flush any pending content with truncation."""
+        # Flush any remaining pending content
+        if self._pending_content and self._should_write_content():
+            truncated = truncate_code_blocks(self._pending_content)
+            stream = self._ensure_stream()
+            await stream.write(truncated)
+            self._pending_content = ""
+
+        await super().stop_stream()
 
 
 class ReasoningMessage(SpinnerMixin, StreamingMessageBase):
