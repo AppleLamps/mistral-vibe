@@ -106,6 +106,18 @@ class WelcomeBanner(Static):
         )
         self._static_line7 = f"[dim]Type[/] [{self.BORDER_TARGET_COLOR}]/help[/] [dim]for more information • [/][{self.BORDER_TARGET_COLOR}]/terminal-setup[/][dim] for shift+enter[/]"
 
+    def update_model(self, new_model: str) -> None:
+        """Update the displayed model name in the banner."""
+        self._static_line2_suffix = (
+            f"{self.LOGO_TEXT_GAP}[dim]{new_model}[/]"
+        )
+        # Clear cached line to force rebuild
+        self._cached_text_lines[1] = None
+        # Force the line to rebuild with current color
+        if self._line_states[1].rendered_color:
+            self._update_colored_line(1, 1)
+            self._update_display()
+
     @property
     def skeleton_color(self) -> str:
         return self._cached_skeleton_color or "#1e1e1e"

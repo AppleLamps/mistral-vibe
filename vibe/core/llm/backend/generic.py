@@ -269,6 +269,10 @@ class GenericBackend:
             api_key=api_key,
         )
 
+        # Merge provider-specific headers first, then caller-provided headers
+        provider_extra = getattr(self._provider, "extra_headers", {})
+        if provider_extra:
+            headers.update(provider_extra)
         if extra_headers:
             headers.update(extra_headers)
 
@@ -334,6 +338,10 @@ class GenericBackend:
             api_key=api_key,
         )
 
+        # Merge provider-specific headers first, then caller-provided headers
+        provider_extra = getattr(self._provider, "extra_headers", {})
+        if provider_extra:
+            headers.update(provider_extra)
         if extra_headers:
             headers.update(extra_headers)
 

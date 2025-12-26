@@ -170,6 +170,28 @@ Vibe supports multiple ways to configure your API keys:
 
 **Note**: The `.env` file is specifically for API keys and other provider credentials. General Vibe configuration should be done in `config.toml`.
 
+### Using OpenRouter
+
+Vibe includes built-in support for [OpenRouter](https://openrouter.ai), which provides access to multiple AI models (Claude, GPT-4, Llama, Gemini, and more) through a single API.
+
+1. **Get your API key** from [OpenRouter](https://openrouter.ai/keys)
+
+2. **Set your API key**:
+
+   ```bash
+   export OPENROUTER_API_KEY="your_openrouter_api_key"
+   ```
+
+   Or add it to `~/.vibe/.env`:
+
+   ```bash
+   OPENROUTER_API_KEY=your_openrouter_api_key
+   ```
+
+3. **Select an OpenRouter model**: Open the model selector with `/model` and you'll see all available OpenRouter models that support tool calling. Models are prefixed with `or:` (e.g., `or:claude-sonnet-4`, `or:gpt-4o`).
+
+**Note**: OpenRouter models are fetched dynamically and cached for 24 hours. Only models that support tool/function calling are shown, as Vibe requires this capability.
+
 ### Custom System Prompts
 
 You can create custom system prompts to replace the default one (`prompts/cli.md`). Create a markdown file in the `~/.vibe/prompts/` directory with your custom prompt content.

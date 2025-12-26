@@ -72,6 +72,11 @@ class CommandRegistry:
                 description="Create a stub skill under .vibe/skills",
                 handler="_scaffold_skill",
             ),
+            "provider": Command(
+                aliases=frozenset(["/provider", "/providers", "/apikey"]),
+                description="Manage API providers and keys",
+                handler="_show_provider",
+            ),
         }
 
         for command in excluded_commands:

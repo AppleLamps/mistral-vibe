@@ -137,6 +137,8 @@ class ProviderConfig(BaseModel):
     api_style: str = "openai"
     backend: Backend = Backend.GENERIC
     reasoning_field_name: str = "reasoning_content"
+    extra_headers: dict[str, str] = Field(default_factory=dict)
+    fetch_models: bool = False
 
 
 class _MCPBase(BaseModel):
@@ -249,6 +251,18 @@ DEFAULT_PROVIDERS = [
         name="llamacpp",
         api_base="http://127.0.0.1:8080/v1",
         api_key_env_var="",  # NOTE: if you wish to use --api-key in llama-server, change this value
+    ),
+    ProviderConfig(
+        name="openrouter",
+        api_base="https://openrouter.ai/api/v1",
+        api_key_env_var="OPENROUTER_API_KEY",
+        backend=Backend.GENERIC,
+        api_style="openai",
+        fetch_models=True,
+        extra_headers={
+            "HTTP-Referer": "https://github.com/mistralai/mistral-vibe",
+            "X-Title": "Mistral Vibe",
+        },
     ),
 ]
 
@@ -365,6 +379,18 @@ class VibeConfig(BaseSettings):
         for model in self.models:
             if model.alias == self.active_model:
                 return model
+
+        # Check if it's a dynamically fetched OpenRouter model
+        if self.active_model.startswith("or:"):
+            from vibe.core.openrouter.gateway import _load_cache, _parse_model
+
+            cache = _load_cache()
+            if cache:
+                for model_data in cache.models:
+                    parsed = _parse_model(model_data)
+                    if parsed and parsed["alias"] == self.active_model:
+                        return ModelConfig(**parsed)
+
         raise ValueError(
             f"Active model '{self.active_model}' not found in configuration."
         )
@@ -376,6 +402,30 @@ class VibeConfig(BaseSettings):
         raise ValueError(
             f"Provider '{model.provider}' for model '{model.name}' not found in configuration."
         )
+
+    async def get_all_models(self) -> list[ModelConfig]:
+        """Get all models including dynamically fetched ones from providers.
+
+        Returns static models from config plus models fetched from providers
+        that have fetch_models=True (e.g., OpenRouter).
+        """
+        from vibe.core.openrouter import OpenRouterGateway
+
+        models = list(self.models)
+        seen_aliases = {m.alias for m in models}
+
+        for provider in self.providers:
+            if provider.fetch_models and provider.name == "openrouter":
+                api_key = os.getenv(provider.api_key_env_var) if provider.api_key_env_var else None
+                if api_key:
+                    gateway = OpenRouterGateway()
+                    fetched = await gateway.fetch_models(api_key)
+                    for model in fetched:
+                        if model.alias not in seen_aliases:
+                            models.append(model)
+                            seen_aliases.add(model.alias)
+
+        return models
 
     @classmethod
     def settings_customise_sources(

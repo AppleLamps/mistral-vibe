@@ -28,6 +28,7 @@ from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.config_app import ConfigApp
+from vibe.cli.textual_ui.widgets.provider_app import ProviderApp
 from vibe.cli.textual_ui.widgets.context_progress import ContextProgress, TokenState
 from vibe.cli.textual_ui.widgets.loading import LoadingWidget
 from vibe.cli.textual_ui.widgets.messages import (
@@ -77,6 +78,7 @@ class BottomApp(StrEnum):
     Approval = auto()
     Config = auto()
     Input = auto()
+    Provider = auto()
 
 
 class VibeApp(App):
@@ -330,6 +332,13 @@ class VibeApp(App):
                     self.theme = TERMINAL_THEME_NAME
             else:
                 self.theme = message.value
+        elif message.key == "active_model":
+            # Update welcome banner immediately for responsive UI
+            try:
+                banner = self.query_one(WelcomeBanner)
+                banner.update_model(message.value)
+            except Exception:
+                pass
 
     async def on_config_app_config_closed(
         self, message: ConfigApp.ConfigClosed
@@ -340,6 +349,20 @@ class VibeApp(App):
         else:
             await self._mount_and_scroll(
                 UserCommandMessage("Configuration closed (no changes saved).")
+            )
+
+        await self._switch_to_input_app()
+
+    async def on_provider_app_provider_closed(
+        self, message: ProviderApp.ProviderClosed
+    ) -> None:
+        if message.changed:
+            await self._mount_and_scroll(
+                UserCommandMessage("Provider settings updated. Reload config if needed.")
+            )
+        else:
+            await self._mount_and_scroll(
+                UserCommandMessage("Provider management closed.")
             )
 
         await self._switch_to_input_app()
@@ -772,6 +795,12 @@ class VibeApp(App):
             return
         await self._switch_to_config_app()
 
+    async def _show_provider(self) -> None:
+        """Switch to the provider management app in the bottom panel."""
+        if self._current_bottom_app == BottomApp.Provider:
+            return
+        await self._switch_to_provider_app()
+
     async def _scaffold_tool(self) -> None:
         try:
             tool_path, prompt_path = scaffold_tool(self.config.effective_workdir)
@@ -808,7 +837,17 @@ class VibeApp(App):
             if self.agent:
                 await self.agent.reload_with_initial_messages(config=new_config)
 
+            old_model = self.config.active_model
             self.config = new_config
+
+            # Update welcome banner if model changed
+            if old_model != self.config.active_model:
+                try:
+                    banner = self.query_one(WelcomeBanner)
+                    banner.update_model(self.config.active_model)
+                except Exception:
+                    pass
+
             if self._context_progress:
                 if self.config.auto_compact_threshold > 0:
                     current_tokens = (
@@ -1018,13 +1057,41 @@ class VibeApp(App):
         if self._mode_indicator:
             self._mode_indicator.display = False
 
+        # Fetch all models including dynamically fetched ones (e.g., OpenRouter)
+        all_models = await self.config.get_all_models()
+        model_aliases = [m.alias for m in all_models]
+
         config_app = ConfigApp(
-            self.config, has_terminal_theme=self._terminal_theme is not None
+            self.config,
+            has_terminal_theme=self._terminal_theme is not None,
+            models=model_aliases,
         )
         await bottom_container.mount(config_app)
         self._current_bottom_app = BottomApp.Config
 
         self.call_after_refresh(config_app.focus)
+
+    async def _switch_to_provider_app(self) -> None:
+        if self._current_bottom_app == BottomApp.Provider:
+            return
+
+        bottom_container = self.query_one("#bottom-app-container")
+        await self._mount_and_scroll(UserCommandMessage("Provider management opened..."))
+
+        try:
+            chat_input_container = self.query_one(ChatInputContainer)
+            await chat_input_container.remove()
+        except NoMatches:
+            pass
+
+        if self._mode_indicator:
+            self._mode_indicator.display = False
+
+        provider_app = ProviderApp(self.config)
+        await bottom_container.mount(provider_app)
+        self._current_bottom_app = BottomApp.Provider
+
+        self.call_after_refresh(provider_app.focus)
 
     async def _switch_to_approval_app(
         self, tool_name: str, tool_args: BaseModel
@@ -1067,6 +1134,12 @@ class VibeApp(App):
         except NoMatches:
             pass
 
+        try:
+            provider_app = self.query_one("#provider-app")
+            await provider_app.remove()
+        except NoMatches:
+            pass
+
         if self._mode_indicator:
             self._mode_indicator.display = True
 
@@ -1102,6 +1175,8 @@ class VibeApp(App):
                     self.query_one(ConfigApp).focus()
                 case BottomApp.Approval:
                     self.query_one(ApprovalApp).focus()
+                case BottomApp.Provider:
+                    self.query_one(ProviderApp).focus()
                 case app:
                     assert_never(app)
         except NoMatches:
@@ -1114,6 +1189,15 @@ class VibeApp(App):
             try:
                 config_app = self.query_one(ConfigApp)
                 config_app.action_close()
+            except NoMatches:
+                pass
+            self._last_escape_time = None
+            return
+
+        if self._current_bottom_app == BottomApp.Provider:
+            try:
+                provider_app = self.query_one(ProviderApp)
+                provider_app.action_close()
             except NoMatches:
                 pass
             self._last_escape_time = None

@@ -1,43 +1,42 @@
-Use `search_replace` to make targeted changes to files using SEARCH/REPLACE blocks. This tool finds exact text matches and replaces them.
+Use `search_replace` to make targeted changes to files using SEARCH/REPLACE blocks.
 
-Arguments:
-- `file_path`: The path to the file to modify
-- `content`: The SEARCH/REPLACE blocks defining the changes
+## Required Format
 
-The content format is:
-
+Every block MUST have these exact markers:
 ```
 <<<<<<< SEARCH
-[exact text to find in the file]
+exact text to find
 =======
-[exact text to replace it with]
+text to replace with
 >>>>>>> REPLACE
 ```
 
-You can include multiple SEARCH/REPLACE blocks to make multiple changes to the same file:
+## Example Tool Call
 
-```
-<<<<<<< SEARCH
+```python
+search_replace(
+    file_path="src/utils.py",
+    content="""<<<<<<< SEARCH
 def old_function():
-    return "old value"
+    return "old"
 =======
 def new_function():
-    return "new value"
->>>>>>> REPLACE
-
-<<<<<<< SEARCH
-import os
-=======
-import os
-import sys
->>>>>>> REPLACE
+    return "new"
+>>>>>>> REPLACE"""
+)
 ```
 
-IMPORTANT:
+## Common Mistakes (will cause "No valid blocks found" error)
 
-- The SEARCH text must match EXACTLY (including whitespace, indentation, and line endings)
-- The SEARCH text must appear exactly once in the file - if it appears multiple times, the tool will error
-- Use at least 5 equals signs (=====) between SEARCH and REPLACE sections
-- The tool will provide detailed error messages showing context if search text is not found
-- Each search/replace block is applied in order, so later blocks see the results of earlier ones
-- Be careful with escape sequences in string literals - use \n not \\n for newlines in code
+❌ Missing `<<<<<<< SEARCH` marker
+❌ Missing `=======` separator
+❌ Missing `>>>>>>> REPLACE` marker
+❌ Using wrong markers like `SEARCH:` or `--- SEARCH ---`
+❌ Empty content with no blocks
+
+## Rules
+
+- SEARCH text must match EXACTLY (whitespace, indentation, line endings)
+- SEARCH text must appear exactly once in the file
+- Use at least 5 equals signs (=====) as separator
+- Multiple blocks are applied in order

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from enum import StrEnum, auto
 from typing import ClassVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from vibe.core.tools.base import (
     BaseTool,
@@ -41,6 +42,17 @@ class TodoArgs(BaseModel):
     todos: list[TodoItem] | None = Field(
         default=None, description="Complete list of todos when writing."
     )
+
+    @field_validator("todos", mode="before")
+    @classmethod
+    def parse_todos_string(cls, v):
+        """Handle double-serialized JSON from LLM outputs."""
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                return v  # Let normal validation handle the error
+        return v
 
 
 class TodoResult(BaseModel):
