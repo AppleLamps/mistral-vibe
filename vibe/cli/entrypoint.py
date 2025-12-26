@@ -42,6 +42,12 @@ def parse_arguments() -> argparse.Namespace:
         help="Start in auto-approve mode: never ask for approval before running tools.",
     )
     parser.add_argument(
+        "--preview-tools",
+        action="store_true",
+        default=False,
+        help="Preview tool calls without executing them (dry-run).",
+    )
+    parser.add_argument(
         "--plan",
         action="store_true",
         default=False,

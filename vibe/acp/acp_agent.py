@@ -61,7 +61,12 @@ from vibe.acp.utils import (
 )
 from vibe.core.agent import Agent as VibeAgent
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
-from vibe.core.config import MissingAPIKeyError, VibeConfig, load_api_keys_from_env
+from vibe.core.config import (
+    MissingAPIKeyError,
+    ModelConfig,
+    VibeConfig,
+    load_api_keys_from_env,
+)
 from vibe.core.modes import AgentMode
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import (
@@ -86,6 +91,8 @@ class VibeAcpAgent(AcpAgent):
         self.sessions: dict[str, AcpSession] = {}
         self.connection = connection
         self.client_capabilities = None
+        self._last_models: list[ModelConfig] | None = None
+        self._last_active_model: str | None = None
 
     @override
     async def initialize(self, params: InitializeRequest) -> InitializeResponse:
@@ -172,7 +179,11 @@ class VibeAcpAgent(AcpAgent):
                 "message": "You must be authenticated before creating a new session"
             }) from e
 
+        self._apply_model_preferences(config)
+
         agent = VibeAgent(config=config, mode=AgentMode.DEFAULT, enable_streaming=True)
+        if self._apply_model_preferences(agent.config):
+            await agent.reload_with_initial_messages(config=agent.config)
         # NOTE: For now, we pin session.id to agent.session_id right after init time.
         # We should just use agent.session_id everywhere, but it can still change during
         # session lifetime (e.g. agent.compact is called).
@@ -184,6 +195,11 @@ class VibeAcpAgent(AcpAgent):
             agent.set_approval_callback(
                 self._create_approval_callback(agent.session_id)
             )
+
+        self._last_models = [
+            model.model_copy(deep=True) for model in agent.config.models
+        ]
+        self._last_active_model = agent.config.active_model
 
         response = NewSessionResponse(
             sessionId=agent.session_id,
@@ -200,6 +216,26 @@ class VibeAcpAgent(AcpAgent):
             ),
         )
         return response
+
+    def _apply_model_preferences(self, config: VibeConfig) -> bool:
+        changed = False
+
+        if self._last_models:
+            preferred_models = [
+                model.model_copy(deep=True) for model in self._last_models
+            ]
+            if preferred_models != config.models:
+                changed = True
+            config.models = preferred_models
+
+        if self._last_active_model and any(
+            model.alias == self._last_active_model for model in config.models
+        ):
+            if config.active_model != self._last_active_model:
+                changed = True
+            config.active_model = self._last_active_model
+
+        return changed
 
     def _get_disabled_tools_from_capabilities(self) -> list[str]:
         if not self.client_capabilities:
@@ -315,15 +351,15 @@ class VibeAcpAgent(AcpAgent):
         if params.modelId not in model_aliases:
             return None
 
-        VibeConfig.save_updates({"active_model": params.modelId})
+        updated_config = session.agent.config.model_copy(deep=True)
+        updated_config.active_model = params.modelId
 
-        new_config = VibeConfig.load(
-            workdir=session.agent.config.workdir,
-            tool_paths=session.agent.config.tool_paths,
-            disabled_tools=self._get_disabled_tools_from_capabilities(),
-        )
+        await session.agent.reload_with_initial_messages(config=updated_config)
 
-        await session.agent.reload_with_initial_messages(config=new_config)
+        self._last_models = [
+            model.model_copy(deep=True) for model in updated_config.models
+        ]
+        self._last_active_model = params.modelId
 
         return SetSessionModelResponse()
 

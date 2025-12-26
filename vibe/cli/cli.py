@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+from typing import TextIO
 
 from rich import print as rprint
 
@@ -34,16 +36,37 @@ def get_initial_mode(args: argparse.Namespace) -> AgentMode:
 def get_prompt_from_stdin() -> str | None:
     if sys.stdin.isatty():
         return None
+
+    original_stdin = sys.__stdin__
     try:
-        if content := sys.stdin.read().strip():
-            sys.stdin = sys.__stdin__ = open("/dev/tty")
-            return content
+        raw_content = sys.stdin.read()
     except KeyboardInterrupt:
         pass
     except OSError:
         return None
-
+    else:
+        content = raw_content.strip()
+        if content:
+            _restore_stdin(original_stdin)
+            return content
     return None
+
+
+def _restore_stdin(original_stdin: TextIO | None) -> None:
+    if os.name == "nt":
+        candidates = ("CONIN$", "CON")
+    else:
+        candidates = ("/dev/tty",)
+
+    for candidate in candidates:
+        try:
+            sys.stdin = sys.__stdin__ = open(candidate)
+            return
+        except OSError:
+            continue
+
+    if original_stdin is not None:
+        sys.stdin = sys.__stdin__ = original_stdin
 
 
 def load_config_or_exit(
@@ -137,6 +160,9 @@ def run_cli(args: argparse.Namespace) -> None:
 
         initial_mode = get_initial_mode(args)
         config = load_config_or_exit(args.agent, initial_mode)
+
+        if getattr(args, "preview_tools", False):
+            config.preview_tools = True
 
         if args.enabled_tools:
             config.enabled_tools = args.enabled_tools

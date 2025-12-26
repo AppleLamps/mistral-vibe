@@ -56,6 +56,7 @@ from vibe.cli.update_notifier import (
 from vibe.core.agent import Agent
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
+from vibe.core.tools.manager import MCPServerStatus
 from vibe.core.modes import AgentMode, next_mode
 from vibe.core.paths.config_paths import HISTORY_FILE
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
@@ -66,6 +67,7 @@ from vibe.core.utils import (
     is_dangerous_directory,
     logger,
 )
+from vibe.setup.scaffold import ScaffoldError, scaffold_skill, scaffold_tool
 
 
 class BottomApp(StrEnum):
@@ -164,6 +166,7 @@ class VibeApp(App):
                 command_registry=self.commands,
                 id="input-container",
                 safety=self._current_agent_mode.safety,
+                base_dir=self.config.effective_workdir,
             )
 
         with Horizontal(id="bottom-bar"):
@@ -269,6 +272,18 @@ class VibeApp(App):
                 get_user_cancellation_message(CancellationReason.OPERATION_CANCELLED)
             )
             self._pending_approval.set_result((ApprovalResponse.NO, feedback))
+
+        await self._switch_to_input_app()
+
+        if self._loading_widget and self._loading_widget.parent:
+            await self._remove_loading_widget()
+
+    async def on_approval_app_approval_preview(
+        self, message: ApprovalApp.ApprovalPreview
+    ) -> None:
+        if self._pending_approval and not self._pending_approval.done():
+            feedback = "Preview only: tool not executed"
+            self._pending_approval.set_result((ApprovalResponse.PREVIEW, feedback))
 
         await self._switch_to_input_app()
 
@@ -690,6 +705,19 @@ class VibeApp(App):
 - **Last Turn Tokens**: {stats.last_turn_total_tokens:,}
 - **Cost**: ${stats.session_cost:.4f}
 """
+
+        mcp_status = getattr(self.agent.tool_manager, "mcp_status", lambda: [])()
+        if mcp_status:
+            status_lines = ["", "### MCP Servers"]
+            for entry in mcp_status:
+                line = (
+                    f"- {entry.name} ({entry.transport}): {entry.registered_tools} tool(s)"
+                )
+                status_lines.append(line)
+                for err in entry.errors:
+                    status_lines.append(f"    - error: {err}")
+            status_text += "\n".join(status_lines)
+
         await self._mount_and_scroll(UserCommandMessage(status_text))
 
     async def _show_config(self) -> None:
@@ -697,6 +725,35 @@ class VibeApp(App):
         if self._current_bottom_app == BottomApp.Config:
             return
         await self._switch_to_config_app()
+
+    async def _scaffold_tool(self) -> None:
+        try:
+            tool_path, prompt_path = scaffold_tool(self.config.effective_workdir)
+            msg = (
+                "## Scaffolded tool\n"
+                f"- Module: `{tool_path}`\n"
+                f"- Prompt: `{prompt_path}`\n"
+                "Restart to load newly added tools."
+            )
+            await self._mount_and_scroll(UserCommandMessage(msg))
+        except ScaffoldError as e:
+            await self._mount_and_scroll(
+                ErrorMessage(str(e), collapsed=self._tools_collapsed)
+            )
+
+    async def _scaffold_skill(self) -> None:
+        try:
+            skill_path = scaffold_skill(self.config.effective_workdir)
+            msg = (
+                "## Scaffolded skill\n"
+                f"- File: `{skill_path}`\n"
+                "Restart to load newly added skills."
+            )
+            await self._mount_and_scroll(UserCommandMessage(msg))
+        except ScaffoldError as e:
+            await self._mount_and_scroll(
+                ErrorMessage(str(e), collapsed=self._tools_collapsed)
+            )
 
     async def _reload_config(self) -> None:
         try:
@@ -981,6 +1038,7 @@ class VibeApp(App):
             command_registry=self.commands,
             id="input-container",
             safety=self._current_agent_mode.safety,
+            base_dir=self.config.effective_workdir,
         )
         await bottom_container.mount(chat_input_container)
         self._chat_input_container = chat_input_container

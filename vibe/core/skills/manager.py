@@ -111,3 +111,6 @@ class SkillManager:
 
     def get_skill(self, name: str) -> SkillInfo | None:
         return self.available_skills.get(name)
+
+    def list_skills(self) -> dict[str, SkillInfo]:
+        return dict(self.available_skills)

@@ -5,6 +5,7 @@ from typing import NamedTuple
 
 from vibe.core.autocompletion.file_indexer import FileIndexer, IndexEntry
 from vibe.core.autocompletion.fuzzy import fuzzy_match
+from vibe.core.trusted_folders import trusted_folders_manager
 
 DEFAULT_MAX_ENTRIES_TO_PROCESS = 32000
 DEFAULT_TARGET_MATCHES = 100
@@ -61,10 +62,14 @@ class PathCompleter(Completer):
         self,
         max_entries_to_process: int = DEFAULT_MAX_ENTRIES_TO_PROCESS,
         target_matches: int = DEFAULT_TARGET_MATCHES,
+        base_dir: Path | None = None,
+        trust_guard: bool = True,
     ) -> None:
         self._indexer = FileIndexer()
         self._max_entries_to_process = max_entries_to_process
         self._target_matches = target_matches
+        self._base_dir = base_dir
+        self._trust_guard = trust_guard
 
     class _SearchContext(NamedTuple):
         suffix: str
@@ -192,9 +197,12 @@ class PathCompleter(Completer):
 
         context = self._build_search_context(partial_path)
 
+        root = self._resolve_root()
+        if root is None:
+            return []
+
         try:
-            # TODO (Vince): doing the assumption that "." is the root directory... Reliable?
-            file_index = self._indexer.get_index(Path("."))
+            file_index = self._indexer.get_index(root)
         except (OSError, RuntimeError):
             return []
 
@@ -216,6 +224,22 @@ class PathCompleter(Completer):
             at_index = before_cursor.rfind("@")
             return (at_index, cursor_pos)
         return None
+
+    def _resolve_root(self) -> Path | None:
+        root = (self._base_dir or Path.cwd()).expanduser()
+        try:
+            resolved = root.resolve()
+        except (OSError, RuntimeError):
+            return None
+
+        if not self._trust_guard:
+            return resolved
+
+        is_trusted = trusted_folders_manager.is_trusted(resolved)
+        if is_trusted is False:
+            return None
+
+        return resolved
 
 
 class MultiCompleter(Completer):

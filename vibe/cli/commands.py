@@ -62,6 +62,16 @@ class CommandRegistry:
                 description="Display agent statistics",
                 handler="_show_status",
             ),
+            "scaffold_tool": Command(
+                aliases=frozenset(["/scaffold-tool"]),
+                description="Create a stub local tool under .vibe/tools",
+                handler="_scaffold_tool",
+            ),
+            "scaffold_skill": Command(
+                aliases=frozenset(["/scaffold-skill"]),
+                description="Create a stub skill under .vibe/skills",
+                handler="_scaffold_skill",
+            ),
         }
 
         for command in excluded_commands:

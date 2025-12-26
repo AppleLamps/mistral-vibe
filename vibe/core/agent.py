@@ -97,12 +97,16 @@ class Agent:
         max_price: float | None = None,
         backend: BackendLike | None = None,
         enable_streaming: bool = False,
+        preview_tools: bool | None = None,
     ) -> None:
         """Initialize the agent with configuration and mode."""
         self.config = config
         self._mode = mode
         self._max_turns = max_turns
         self._max_price = max_price
+        self.preview_tools = (
+            preview_tools if preview_tools is not None else config.preview_tools
+        )
 
         self.tool_manager = ToolManager(config)
         self.skill_manager = SkillManager(config)
@@ -520,6 +524,31 @@ class Agent:
         if not any(approved_tools):
             return
 
+        if self.preview_tools:
+            for item in approved_tools:
+                if item is None:
+                    continue
+                _, tool_call, _, tool_call_id = item
+                skip_reason = "Preview mode enabled: tool not executed"
+
+                yield ToolResultEvent(
+                    tool_name=tool_call.tool_name,
+                    tool_class=tool_call.tool_class,
+                    skipped=True,
+                    skip_reason=skip_reason,
+                    tool_call_id=tool_call_id,
+                )
+
+                self.messages.append(
+                    LLMMessage.model_validate(
+                        self.format_handler.create_tool_response_message(
+                            tool_call, skip_reason
+                        )
+                    )
+                )
+                self.stats.tool_calls_rejected += 1
+            return
+
         # Separate file-modifying tools from parallelizable tools
         file_modifying_items: list[tuple[int, Any]] = []
         parallel_items: list[tuple[int, Any]] = []
@@ -796,6 +825,10 @@ class Agent:
                     verdict=ToolExecutionResponse.EXECUTE, feedback=feedback
                 )
             case ApprovalResponse.NO:
+                return ToolDecision(
+                    verdict=ToolExecutionResponse.SKIP, feedback=feedback
+                )
+            case ApprovalResponse.PREVIEW:
                 return ToolDecision(
                     verdict=ToolExecutionResponse.SKIP, feedback=feedback
                 )

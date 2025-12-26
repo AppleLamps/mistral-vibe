@@ -17,7 +17,7 @@ from vibe.core.config import PROJECT_DOC_FILENAMES
 from vibe.core.llm.format import get_active_tool_classes
 from vibe.core.paths.config_paths import INSTRUCTIONS_FILE
 from vibe.core.prompts import UtilityPrompt
-from vibe.core.utils import is_dangerous_directory, is_windows
+from vibe.core.utils import is_dangerous_directory, is_windows, run_sync
 
 if TYPE_CHECKING:
     from vibe.core.config import ProjectContextConfig, VibeConfig
@@ -371,18 +371,7 @@ class ProjectContextProvider:
         Falls back gracefully if git is not available or times out.
         """
         try:
-            # Try to get or create an event loop
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_closed():
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
-            # Run the async git operations
-            return loop.run_until_complete(self._get_git_status_async())
+            return run_sync(self._get_git_status_async())
         except Exception as e:
             return f"Error getting git status: {e}"
 

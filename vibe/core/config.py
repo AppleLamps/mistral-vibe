@@ -106,6 +106,11 @@ class SessionLoggingConfig(BaseSettings):
     save_dir: str = ""
     session_prefix: str = "session"
     enabled: bool = True
+    redact_env_vars: bool = True
+    include_tools: bool = True
+    include_providers: bool = True
+    write_buffer_bytes: int = 64 * 1024
+    include_context_snapshot: bool = False
 
     @field_validator("save_dir", mode="before")
     @classmethod
@@ -288,6 +293,7 @@ class VibeConfig(BaseSettings):
     include_project_context: bool = True
     include_prompt_detail: bool = True
     enable_update_checks: bool = True
+    preview_tools: bool = False
     api_timeout: float = 720.0
     providers: list[ProviderConfig] = Field(
         default_factory=lambda: list(DEFAULT_PROVIDERS)

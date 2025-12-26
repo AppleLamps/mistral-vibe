@@ -39,12 +39,14 @@ class ChatInputContainer(Vertical):
         history_file: Path | None = None,
         command_registry: CommandRegistry | None = None,
         safety: ModeSafety = ModeSafety.NEUTRAL,
+        base_dir: Path | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._history_file = history_file
         self._command_registry = command_registry or CommandRegistry()
         self._safety = safety
+        self._base_dir = base_dir
 
         command_entries = [
             (alias, command.description)
@@ -54,7 +56,7 @@ class ChatInputContainer(Vertical):
 
         self._completion_manager = MultiCompletionManager([
             SlashCommandController(CommandCompleter(command_entries), self),
-            PathCompletionController(PathCompleter(), self),
+            PathCompletionController(PathCompleter(base_dir=self._base_dir), self),
         ])
         self._completion_popup: CompletionPopup | None = None
         self._body: ChatInputBody | None = None

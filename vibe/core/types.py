@@ -161,6 +161,7 @@ class Role(StrEnum):
 class ApprovalResponse(StrEnum):
     YES = "y"
     NO = "n"
+    PREVIEW = "p"
 
 
 class LLMMessage(BaseModel):

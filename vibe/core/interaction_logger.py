@@ -11,8 +11,9 @@ from typing import TYPE_CHECKING, Any
 import aiofiles
 
 from vibe.core.llm.format import get_active_tool_classes
+from vibe.core.system_prompt import ProjectContextProvider
 from vibe.core.types import AgentStats, LLMMessage, SessionInfo, SessionMetadata
-from vibe.core.utils import is_windows
+from vibe.core.utils import is_windows, run_sync
 
 if TYPE_CHECKING:
     from vibe.core.config import SessionLoggingConfig, VibeConfig
@@ -33,6 +34,7 @@ class InteractionLogger:
         self.enabled = session_config.enabled
         self.auto_approve = auto_approve
         self.workdir = workdir
+        self._context_snapshot: str | None = None
 
         if not self.enabled:
             self.save_dir: Path | None = None
@@ -126,18 +128,7 @@ class InteractionLogger:
         """
         # Get git metadata concurrently
         try:
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_closed():
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
-            git_commit, git_branch = loop.run_until_complete(
-                self._get_git_metadata_async()
-            )
+            git_commit, git_branch = run_sync(self._get_git_metadata_async())
         except Exception:
             git_commit, git_branch = None, None
 
@@ -154,6 +145,35 @@ class InteractionLogger:
             environment={"working_directory": str(self.workdir)},
         )
 
+    def _build_agent_config(self, config: VibeConfig) -> dict[str, Any]:
+        cfg = config.model_dump(mode="json")
+
+        if not self.session_config.include_providers:
+            cfg.pop("providers", None)
+        elif self.session_config.redact_env_vars:
+            for provider in cfg.get("providers", []):
+                if isinstance(provider, dict) and "api_key_env_var" in provider:
+                    provider["api_key_env_var"] = "<redacted>"
+
+        if not self.session_config.include_tools:
+            cfg.pop("tools", None)
+
+        return cfg
+
+    def _ensure_context_snapshot(self, config: VibeConfig) -> None:
+        if not self.session_config.include_context_snapshot:
+            return
+        if self._context_snapshot is not None:
+            return
+
+        try:
+            provider = ProjectContextProvider(
+                config=config.project_context, root_path=config.effective_workdir
+            )
+            self._context_snapshot = provider.get_full_context()
+        except Exception:
+            self._context_snapshot = None
+
     async def save_interaction(
         self,
         messages: list[LLMMessage],
@@ -167,36 +187,50 @@ class InteractionLogger:
         if self.session_metadata is None:
             return None
 
-        active_tools = get_active_tool_classes(tool_manager, config)
+        tools_available: list[dict[str, Any]] = []
+        if self.session_config.include_tools:
+            active_tools = get_active_tool_classes(tool_manager, config)
+            tools_available = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool_class.get_name(),
+                        "description": tool_class.description,
+                        "parameters": tool_class.get_parameters(),
+                    },
+                }
+                for tool_class in active_tools
+            ]
 
-        tools_available = [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool_class.get_name(),
-                    "description": tool_class.description,
-                    "parameters": tool_class.get_parameters(),
-                },
-            }
-            for tool_class in active_tools
-        ]
+        metadata = {
+            **self.session_metadata.model_dump(),
+            "end_time": datetime.now().isoformat(),
+            "stats": stats.model_dump(),
+            "total_messages": len(messages),
+            "agent_config": self._build_agent_config(config),
+        }
+
+        self._ensure_context_snapshot(config)
+        if self._context_snapshot:
+            metadata["context_snapshot"] = self._context_snapshot
+
+        if tools_available:
+            metadata["tools_available"] = tools_available
 
         interaction_data = {
-            "metadata": {
-                **self.session_metadata.model_dump(),
-                "end_time": datetime.now().isoformat(),
-                "stats": stats.model_dump(),
-                "total_messages": len(messages),
-                "tools_available": tools_available,
-                "agent_config": config.model_dump(mode="json"),
-            },
+            "metadata": metadata,
             "messages": [m.model_dump(exclude_none=True) for m in messages],
         }
 
         try:
             json_content = json.dumps(interaction_data, indent=2, ensure_ascii=False)
 
-            async with aiofiles.open(self.filepath, "w", encoding="utf-8") as f:
+            async with aiofiles.open(
+                self.filepath,
+                "w",
+                encoding="utf-8",
+                buffering=self.session_config.write_buffer_bytes,
+            ) as f:
                 await f.write(json_content)
 
             return str(self.filepath)
