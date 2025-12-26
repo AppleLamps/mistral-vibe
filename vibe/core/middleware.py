@@ -147,6 +147,8 @@ PLAN_MODE_REMINDER = f"""<{VIBE_WARNING_TAG}>Plan mode is active. The user indic
 1. Answer the user's query comprehensively
 2. When you're done researching, present your plan by giving the full plan and not doing further tool calls to return input to the user. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan.</{VIBE_WARNING_TAG}>"""
 
+MODE_TRANSITION_NOTICE = f"""<{VIBE_WARNING_TAG}>Mode has changed. You are now in {{mode_name}} mode. {{mode_description}} You may now proceed with executing tools and making changes as appropriate for this mode.</{VIBE_WARNING_TAG}>"""
+
 
 class PlanModeMiddleware:
     """Injects plan mode reminder after each assistant turn when plan mode is active."""
@@ -172,6 +174,45 @@ class PlanModeMiddleware:
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
         pass
+
+
+class ModeTransitionMiddleware:
+    """Notifies the model when transitioning out of plan mode to clarify it can now execute."""
+
+    def __init__(
+        self,
+        mode_getter: Callable[[], AgentMode],
+        notice_template: str = MODE_TRANSITION_NOTICE,
+    ) -> None:
+        self._mode_getter = mode_getter
+        self._notice_template = notice_template
+        self._last_mode: AgentMode | None = None
+        self._pending_notification: str | None = None
+
+    def notify_mode_change(self, old_mode: AgentMode, new_mode: AgentMode) -> None:
+        """Called externally when mode changes to queue a notification."""
+        # Only notify when transitioning FROM plan mode to another mode
+        if old_mode == AgentMode.PLAN and new_mode != AgentMode.PLAN:
+            self._pending_notification = self._notice_template.format(
+                mode_name=new_mode.display_name,
+                mode_description=new_mode.description,
+            )
+
+    async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
+        # Check if there's a pending notification from mode change
+        if self._pending_notification:
+            notification = self._pending_notification
+            self._pending_notification = None
+            return MiddlewareResult(
+                action=MiddlewareAction.INJECT_MESSAGE, message=notification
+            )
+        return MiddlewareResult()
+
+    async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
+        return MiddlewareResult()
+
+    def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
+        self._pending_notification = None
 
 
 class MiddlewarePipeline:

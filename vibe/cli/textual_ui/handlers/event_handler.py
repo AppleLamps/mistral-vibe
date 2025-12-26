@@ -24,6 +24,10 @@ if TYPE_CHECKING:
 
 
 class EventHandler:
+    # Content patterns to detect for status updates
+    CODE_BLOCK_PATTERN = "```"
+    CODE_INDICATORS = ("def ", "class ", "function ", "const ", "import ", "from ")
+
     def __init__(
         self,
         mount_callback: Callable,
@@ -39,6 +43,8 @@ class EventHandler:
         self.get_todos_collapsed = get_todos_collapsed
         self.current_tool_call: ToolCallMessage | None = None
         self.current_compact: CompactMessage | None = None
+        self._accumulated_content: str = ""
+        self._last_status: str | None = None
 
     async def handle_event(
         self,
@@ -48,14 +54,17 @@ class EventHandler:
     ) -> ToolCallMessage | None:
         match event:
             case ToolCallEvent():
+                # Reset accumulated content when a new tool is called
+                self._accumulated_content = ""
+                self._last_status = None
                 return await self._handle_tool_call(event, loading_widget)
             case ToolResultEvent():
                 sanitized_event = self._sanitize_event(event)
                 await self._handle_tool_result(sanitized_event)
             case ReasoningEvent():
-                await self._handle_reasoning_message(event)
+                await self._handle_reasoning_message(event, loading_widget)
             case AssistantEvent():
-                await self._handle_assistant_message(event)
+                await self._handle_assistant_message(event, loading_widget)
             case CompactStartEvent():
                 await self._handle_compact_start()
             case CompactEndEvent():
@@ -120,10 +129,55 @@ class EventHandler:
 
         self.current_tool_call = None
 
-    async def _handle_assistant_message(self, event: AssistantEvent) -> None:
+    def _detect_content_status(self, content: str) -> str | None:
+        """Detect content type and return appropriate status text."""
+        # Check for code blocks
+        if self.CODE_BLOCK_PATTERN in content:
+            return "Writing code"
+
+        # Check for code-like content
+        for indicator in self.CODE_INDICATORS:
+            if indicator in content:
+                return "Generating code"
+
+        # Check for planning indicators
+        planning_indicators = ("Step ", "1.", "First,", "Plan:", "approach")
+        for indicator in planning_indicators:
+            if indicator in content:
+                return "Planning"
+
+        return None
+
+    def _update_loading_status(
+        self, loading_widget: LoadingWidget | None, content: str
+    ) -> None:
+        """Update loading widget status based on accumulated content."""
+        if not loading_widget:
+            return
+
+        self._accumulated_content += content
+
+        # Only check periodically to avoid too many updates
+        if len(self._accumulated_content) % 50 != 0:
+            return
+
+        new_status = self._detect_content_status(self._accumulated_content)
+        if new_status and new_status != self._last_status:
+            self._last_status = new_status
+            loading_widget.set_status(new_status)
+
+    async def _handle_assistant_message(
+        self, event: AssistantEvent, loading_widget: LoadingWidget | None = None
+    ) -> None:
+        self._update_loading_status(loading_widget, event.content)
         await self.mount_callback(AssistantMessage(event.content))
 
-    async def _handle_reasoning_message(self, event: ReasoningEvent) -> None:
+    async def _handle_reasoning_message(
+        self, event: ReasoningEvent, loading_widget: LoadingWidget | None = None
+    ) -> None:
+        if loading_widget and self._last_status != "Thinking":
+            loading_widget.set_status("Thinking")
+            self._last_status = "Thinking"
         tools_collapsed = self.get_tools_collapsed()
         await self.mount_callback(
             ReasoningMessage(event.content, collapsed=tools_collapsed)
@@ -155,3 +209,8 @@ class EventHandler:
         if self.current_compact:
             self.current_compact.stop_spinning(success=False)
             self.current_compact = None
+
+    def reset_content_tracking(self) -> None:
+        """Reset accumulated content and status tracking."""
+        self._accumulated_content = ""
+        self._last_status = None
