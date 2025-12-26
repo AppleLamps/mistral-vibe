@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -349,6 +350,12 @@ for lang_name, config in LANGUAGE_CONFIG.items():
         EXTENSION_TO_LANGUAGE[ext] = lang_name
 
 
+@lru_cache(maxsize=1000)
+def _get_language_for_suffix(suffix: str) -> str | None:
+    """Cached language lookup by file suffix."""
+    return EXTENSION_TO_LANGUAGE.get(suffix.lower())
+
+
 def get_language_for_file(file_path: str | Path) -> str | None:
     """Detect language from file extension.
 
@@ -357,10 +364,13 @@ def get_language_for_file(file_path: str | Path) -> str | None:
 
     Returns:
         Language name if recognized, None otherwise
+
+    Note:
+        Uses LRU cache internally to avoid repeated Path/suffix operations
+        for files with the same extension.
     """
-    path = Path(file_path)
-    ext = path.suffix.lower()
-    return EXTENSION_TO_LANGUAGE.get(ext)
+    path = Path(file_path) if isinstance(file_path, str) else file_path
+    return _get_language_for_suffix(path.suffix)
 
 
 def get_supported_extensions() -> list[str]:

@@ -26,6 +26,54 @@ from vibe.core.tools.base import BaseToolConfig
 
 PROJECT_DOC_FILENAMES = ["AGENTS.md", "VIBE.md", ".vibe.md"]
 
+# Cached OpenRouter model index for O(1) lookup in get_active_model()
+# Built lazily on first access and invalidated when cache file changes
+_openrouter_model_index: dict[str, dict[str, Any]] | None = None
+_openrouter_cache_mtime: float = 0.0
+
+
+def _get_openrouter_model_index() -> dict[str, dict[str, Any]]:
+    """Get or build the OpenRouter model index for fast alias lookups.
+
+    Returns:
+        Dict mapping model aliases to parsed model config dicts.
+    """
+    global _openrouter_model_index, _openrouter_cache_mtime
+    from vibe.core.openrouter.gateway import _get_cache_path, _load_cache, _parse_model
+
+    cache_path = _get_cache_path()
+    try:
+        current_mtime = cache_path.stat().st_mtime if cache_path.exists() else 0.0
+    except OSError:
+        current_mtime = 0.0
+
+    # Return cached index if still valid
+    if _openrouter_model_index is not None and current_mtime == _openrouter_cache_mtime:
+        return _openrouter_model_index
+
+    # Rebuild index
+    _openrouter_model_index = {}
+    _openrouter_cache_mtime = current_mtime
+
+    cache = _load_cache()
+    if not cache:
+        return _openrouter_model_index
+
+    seen_aliases: set[str] = set()
+    for model_data in cache.models:
+        parsed = _parse_model(model_data)
+        if parsed:
+            alias = parsed["alias"]
+            # Handle duplicate aliases
+            if alias in seen_aliases:
+                alias = f"or:{parsed['name'].replace('/', '-')}"
+                parsed["alias"] = alias
+            if alias not in seen_aliases:
+                seen_aliases.add(alias)
+                _openrouter_model_index[alias] = parsed
+
+    return _openrouter_model_index
+
 
 def load_api_keys_from_env() -> None:
     if GLOBAL_ENV_FILE.path.is_file():
@@ -380,16 +428,11 @@ class VibeConfig(BaseSettings):
             if model.alias == self.active_model:
                 return model
 
-        # Check if it's a dynamically fetched OpenRouter model
+        # Check if it's a dynamically fetched OpenRouter model using cached index
         if self.active_model.startswith("or:"):
-            from vibe.core.openrouter.gateway import _load_cache, _parse_model
-
-            cache = _load_cache()
-            if cache:
-                for model_data in cache.models:
-                    parsed = _parse_model(model_data)
-                    if parsed and parsed["alias"] == self.active_model:
-                        return ModelConfig(**parsed)
+            model_index = _get_openrouter_model_index()
+            if parsed := model_index.get(self.active_model):
+                return ModelConfig(**parsed)
 
         raise ValueError(
             f"Active model '{self.active_model}' not found in configuration."
