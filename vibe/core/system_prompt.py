@@ -373,13 +373,33 @@ class ProjectContextProvider:
             return f"Error getting git status: {e}"
 
     def get_git_status(self) -> str:
-        """Get git status information.
+        """Get git status information with time-based caching.
 
         Runs multiple git commands concurrently for better performance.
         Falls back gracefully if git is not available or times out.
+        Caches results for GIT_STATUS_CACHE_TTL_SECONDS to avoid repeated calls.
         """
+        cache_key = str(self.root_path)
+        current_time = time.time()
+
+        # Check cache
+        if cache_key in _git_status_cache:
+            cached_time, cached_result = _git_status_cache[cache_key]
+            if current_time - cached_time < GIT_STATUS_CACHE_TTL_SECONDS:
+                return cached_result
+
+        # Cache miss or expired - fetch fresh status
         try:
-            return run_sync(self._get_git_status_async())
+            result = run_sync(self._get_git_status_async())
+            _git_status_cache[cache_key] = (current_time, result)
+
+            # Limit cache size
+            if len(_git_status_cache) > 50:
+                # Remove oldest entries
+                oldest_key = min(_git_status_cache, key=lambda k: _git_status_cache[k][0])
+                del _git_status_cache[oldest_key]
+
+            return result
         except Exception as e:
             return f"Error getting git status: {e}"
 
@@ -494,6 +514,11 @@ def _get_available_skills_section(skill_manager: SkillManager | None) -> str:
 
 # Cache for get_universal_system_prompt to avoid expensive directory traversal
 _system_prompt_cache: dict[tuple, str] = {}
+
+# Cache for git status to avoid running git commands too frequently
+# Key: (workdir, timestamp_bucket), Value: git status string
+_git_status_cache: dict[str, tuple[float, str]] = {}
+GIT_STATUS_CACHE_TTL_SECONDS: float = 5.0  # Cache git status for 5 seconds
 
 
 def _get_cache_invalidation_keys(workdir: Path) -> tuple[int, str]:

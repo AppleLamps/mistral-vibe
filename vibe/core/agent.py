@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncGenerator, Callable
 from enum import StrEnum, auto
 import time
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -568,9 +568,7 @@ class Agent:
             else:
                 parallel_items.append((i, item))
 
-        result_map: dict[int, tuple[bool, Any, float, str | None]] = {}
-
-        # Execute file-modifying tools sequentially to prevent race conditions
+        # Execute file-modifying tools sequentially and emit results immediately
         try:
             for i, item in file_modifying_items:
                 idx, tool_call, tool_instance, tool_call_id = item
@@ -579,102 +577,121 @@ class Agent:
                 )
                 if isinstance(result, (asyncio.CancelledError, KeyboardInterrupt)):
                     raise result
-                result_map[i] = result
+                # Emit result immediately after execution
+                async for event in self._emit_tool_result(tool_call, result, tool_call_id):
+                    yield event
 
-            # Execute parallelizable tools concurrently
+            # Execute parallelizable tools concurrently with immediate result emission
             if parallel_items:
-                parallel_tasks = [
-                    self._execute_single_tool(item[2], item[1], item[3])
+                # Create tasks with their metadata for tracking
+                tasks_with_meta = [
+                    (
+                        asyncio.create_task(
+                            self._execute_single_tool(item[2], item[1], item[3])
+                        ),
+                        item,  # (idx, tool_call, tool_instance, tool_call_id)
+                    )
                     for _, item in parallel_items
                 ]
-                parallel_results = await asyncio.gather(
-                    *parallel_tasks, return_exceptions=True
-                )
-                for (i, _), result in zip(parallel_items, parallel_results):
-                    result_map[i] = result
 
-            # Phase 3: Emit results in original order
-            for i, item in enumerate(approved_tools):
-                if item is None:
-                    continue
-
-                idx, tool_call, tool_instance, tool_call_id = item
-                result = result_map[i]
-
-                # Handle exceptions that occurred during execution
-                if isinstance(result, (asyncio.CancelledError, KeyboardInterrupt)):
-                    cancel = str(
-                        get_user_cancellation_message(CancellationReason.TOOL_INTERRUPTED)
+                # Process results as they complete (real-time updates!)
+                pending = {task: meta for task, meta in tasks_with_meta}
+                while pending:
+                    done, _ = await asyncio.wait(
+                        pending.keys(), return_when=asyncio.FIRST_COMPLETED
                     )
-                    yield ToolResultEvent(
-                        tool_name=tool_call.tool_name,
-                        tool_class=tool_call.tool_class,
-                        error=cancel,
-                        tool_call_id=tool_call_id,
-                    )
-                    self.messages.append(
-                        LLMMessage.model_validate(
-                            self.format_handler.create_tool_response_message(
-                                tool_call, cancel
-                            )
-                        )
-                    )
-                    raise result
+                    for task in done:
+                        item = pending.pop(task)
+                        idx, tool_call, tool_instance, tool_call_id = item
+                        try:
+                            result = task.result()
+                        except (asyncio.CancelledError, KeyboardInterrupt):
+                            raise
+                        except Exception as exc:
+                            # Handle unexpected exceptions
+                            error_msg = f"<{TOOL_ERROR_TAG}>{tool_call.tool_name} failed: {exc}</{TOOL_ERROR_TAG}>"
+                            result = (False, None, 0.0, error_msg)
 
-                # Unpack execution result
-                success, result_model, duration, error_msg = result
-
-                if success:
-                    # Success case
-                    text = "\n".join(
-                        f"{k}: {v}" for k, v in result_model.model_dump().items()
-                    )
-
-                    self.messages.append(
-                        LLMMessage.model_validate(
-                            self.format_handler.create_tool_response_message(
-                                tool_call, text
-                            )
-                        )
-                    )
-
-                    yield ToolResultEvent(
-                        tool_name=tool_call.tool_name,
-                        tool_class=tool_call.tool_class,
-                        result=result_model,
-                        duration=duration,
-                        tool_call_id=tool_call_id,
-                    )
-
-                    self.stats.tool_calls_succeeded += 1
-
-                else:
-                    # Error case
-                    yield ToolResultEvent(
-                        tool_name=tool_call.tool_name,
-                        tool_class=tool_call.tool_class,
-                        error=error_msg,
-                        tool_call_id=tool_call_id,
-                    )
-
-                    # Check if error was ToolPermissionError (encoded in error message)
-                    if "ToolPermissionError" in str(error_msg):
-                        self.stats.tool_calls_agreed -= 1
-                        self.stats.tool_calls_rejected += 1
-                    else:
-                        self.stats.tool_calls_failed += 1
-
-                    self.messages.append(
-                        LLMMessage.model_validate(
-                            self.format_handler.create_tool_response_message(
-                                tool_call, error_msg
-                            )
-                        )
-                    )
+                        # Emit result immediately as each tool completes
+                        async for event in self._emit_tool_result(
+                            tool_call, result, tool_call_id
+                        ):
+                            yield event
 
         except (asyncio.CancelledError, KeyboardInterrupt):
             # Handle cancellation during execution
             raise
+
+    async def _emit_tool_result(
+        self, tool_call, result: tuple[bool, Any, float, str | None], tool_call_id: str
+    ) -> AsyncGenerator[ToolResultEvent, None]:
+        """Emit a tool result event and update state. Used for real-time UI updates."""
+        # Handle exceptions that occurred during execution
+        if isinstance(result, (asyncio.CancelledError, KeyboardInterrupt)):
+            cancel = str(
+                get_user_cancellation_message(CancellationReason.TOOL_INTERRUPTED)
+            )
+            yield ToolResultEvent(
+                tool_name=tool_call.tool_name,
+                tool_class=tool_call.tool_class,
+                error=cancel,
+                tool_call_id=tool_call_id,
+            )
+            self.messages.append(
+                LLMMessage.model_validate(
+                    self.format_handler.create_tool_response_message(tool_call, cancel)
+                )
+            )
+            raise result
+
+        # Unpack execution result
+        success, result_model, duration, error_msg = result
+
+        if success:
+            # Success case
+            text = "\n".join(
+                f"{k}: {v}" for k, v in result_model.model_dump().items()
+            )
+
+            self.messages.append(
+                LLMMessage.model_validate(
+                    self.format_handler.create_tool_response_message(tool_call, text)
+                )
+            )
+
+            yield ToolResultEvent(
+                tool_name=tool_call.tool_name,
+                tool_class=tool_call.tool_class,
+                result=result_model,
+                duration=duration,
+                tool_call_id=tool_call_id,
+            )
+
+            self.stats.tool_calls_succeeded += 1
+
+        else:
+            # Error case
+            yield ToolResultEvent(
+                tool_name=tool_call.tool_name,
+                tool_class=tool_call.tool_class,
+                error=error_msg,
+                tool_call_id=tool_call_id,
+            )
+
+            # Check if error was ToolPermissionError (encoded in error message)
+            if "ToolPermissionError" in str(error_msg):
+                self.stats.tool_calls_agreed -= 1
+                self.stats.tool_calls_rejected += 1
+            else:
+                self.stats.tool_calls_failed += 1
+
+            self.messages.append(
+                LLMMessage.model_validate(
+                    self.format_handler.create_tool_response_message(
+                        tool_call, error_msg
+                    )
+                )
+            )
 
     async def _chat(self, max_tokens: int | None = None) -> LLMChunk:
         active_model = self.config.get_active_model()

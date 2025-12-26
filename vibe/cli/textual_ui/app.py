@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, VerticalScroll
+from textual.css.query import NoMatches
 from textual.events import AppBlur, AppFocus, MouseUp
 from textual.widget import Widget
 from textual.widgets import Static
@@ -32,6 +33,7 @@ from vibe.cli.textual_ui.widgets.loading import LoadingWidget
 from vibe.cli.textual_ui.widgets.messages import (
     AssistantMessage,
     BashOutputMessage,
+    ErrorBanner,
     ErrorMessage,
     InterruptMessage,
     ReasoningMessage,
@@ -54,6 +56,7 @@ from vibe.cli.update_notifier import (
     get_update_if_available,
 )
 from vibe.core.agent import Agent
+from vibe.core.error_logger import log_error
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
 from vibe.core.tools.manager import MCPServerStatus
@@ -149,11 +152,19 @@ class VibeApp(App):
         self._auto_scroll = True
         self._last_escape_time: float | None = None
         self._terminal_theme = capture_terminal_theme()
+        # Debounce tracking for context progress updates
+        self._last_context_update_time: float = 0.0
+        self._context_update_interval: float = 0.1  # 100ms = max 10 updates/second
+        # Error banner for displaying notifications
+        self._error_banner: ErrorBanner | None = None
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="chat"):
             yield WelcomeBanner(self.config)
             yield Static(id="messages")
+
+        # Error notification banner (hidden by default)
+        yield ErrorBanner()
 
         with Horizontal(id="loading-area"):
             yield Static(id="loading-area-content")
@@ -198,6 +209,7 @@ class VibeApp(App):
         self._chat_input_container = self.query_one(ChatInputContainer)
         self._mode_indicator = self.query_one(ModeIndicator)
         self._context_progress = self.query_one(ContextProgress)
+        self._error_banner = self.query_one(ErrorBanner)
 
         if self.config.auto_compact_threshold > 0:
             self._context_progress.tokens = TokenState(
@@ -301,14 +313,14 @@ class VibeApp(App):
         try:
             todo_area = self.query_one("#todo-area")
             todo_area.add_class("loading-active")
-        except Exception:
+        except NoMatches:
             pass
 
     def _hide_todo_area(self) -> None:
         try:
             todo_area = self.query_one("#todo-area")
             todo_area.remove_class("loading-active")
-        except Exception:
+        except NoMatches:
             pass
 
     def on_config_app_setting_changed(self, message: ConfigApp.SettingChanged) -> None:
@@ -500,8 +512,20 @@ class VibeApp(App):
             return
         except Exception as e:
             self.agent = None
+            # Log to persistent error file
+            log_error(
+                "Agent initialization failed",
+                error=e,
+                context={"model": self.config.get_active_model()}
+            )
             await self._mount_and_scroll(
                 ErrorMessage(str(e), collapsed=self._tools_collapsed)
+            )
+            # Show error banner for initialization failures
+            await self.show_error_notification(
+                f"Agent initialization failed: {str(e)[:80]}{'...' if len(str(e)) > 80 else ''}",
+                severity="error",
+                timeout=0  # Don't auto-dismiss initialization errors
             )
         finally:
             self._agent_initializing = False
@@ -602,12 +626,19 @@ class VibeApp(App):
                 prompt, base_dir=self.config.effective_workdir
             )
             async for event in self.agent.act(rendered_prompt):
+                # Debounce context progress updates to max 10/second for snappier UI
                 if self._context_progress and self.agent:
-                    current_state = self._context_progress.tokens
-                    self._context_progress.tokens = TokenState(
-                        max_tokens=current_state.max_tokens,
-                        current_tokens=self.agent.stats.context_tokens,
-                    )
+                    current_time = time.monotonic()
+                    if (
+                        current_time - self._last_context_update_time
+                        >= self._context_update_interval
+                    ):
+                        current_state = self._context_progress.tokens
+                        self._context_progress.tokens = TokenState(
+                            max_tokens=current_state.max_tokens,
+                            current_tokens=self.agent.stats.context_tokens,
+                        )
+                        self._last_context_update_time = current_time
 
                 if self.event_handler:
                     await self.event_handler.handle_event(
@@ -627,8 +658,19 @@ class VibeApp(App):
                 await self._loading_widget.remove()
             if self.event_handler:
                 self.event_handler.stop_current_tool_call()
+            # Log to persistent error file
+            log_error(
+                "Agent turn failed",
+                error=e,
+                context={"prompt_preview": prompt[:100] if prompt else None}
+            )
             await self._mount_and_scroll(
                 ErrorMessage(str(e), collapsed=self._tools_collapsed)
+            )
+            # Also show a prominent error banner for visibility
+            await self.show_error_notification(
+                f"Agent error: {str(e)[:100]}{'...' if len(str(e)) > 100 else ''}",
+                severity="error"
             )
         finally:
             self._agent_running = False
@@ -970,7 +1012,7 @@ class VibeApp(App):
         try:
             chat_input_container = self.query_one(ChatInputContainer)
             await chat_input_container.remove()
-        except Exception:
+        except NoMatches:
             pass
 
         if self._mode_indicator:
@@ -992,7 +1034,7 @@ class VibeApp(App):
         try:
             chat_input_container = self.query_one(ChatInputContainer)
             await chat_input_container.remove()
-        except Exception:
+        except NoMatches:
             pass
 
         if self._mode_indicator:
@@ -1016,13 +1058,13 @@ class VibeApp(App):
         try:
             config_app = self.query_one("#config-app")
             await config_app.remove()
-        except Exception:
+        except NoMatches:
             pass
 
         try:
             approval_app = self.query_one("#approval-app")
             await approval_app.remove()
-        except Exception:
+        except NoMatches:
             pass
 
         if self._mode_indicator:
@@ -1034,7 +1076,7 @@ class VibeApp(App):
             self._current_bottom_app = BottomApp.Input
             self.call_after_refresh(chat_input_container.focus_input)
             return
-        except Exception:
+        except NoMatches:
             pass
 
         chat_input_container = ChatInputContainer(
@@ -1062,7 +1104,7 @@ class VibeApp(App):
                     self.query_one(ApprovalApp).focus()
                 case app:
                     assert_never(app)
-        except Exception:
+        except NoMatches:
             pass
 
     def action_interrupt(self) -> None:
@@ -1072,7 +1114,7 @@ class VibeApp(App):
             try:
                 config_app = self.query_one(ConfigApp)
                 config_app.action_close()
-            except Exception:
+            except NoMatches:
                 pass
             self._last_escape_time = None
             return
@@ -1081,7 +1123,7 @@ class VibeApp(App):
             try:
                 approval_app = self.query_one(ApprovalApp)
                 approval_app.action_reject()
-            except Exception:
+            except NoMatches:
                 pass
             self._last_escape_time = None
             return
@@ -1098,7 +1140,7 @@ class VibeApp(App):
                     input_widget.value = ""
                     self._last_escape_time = None
                     return
-            except Exception:
+            except NoMatches:
                 pass
 
         has_pending_user_message = any(
@@ -1200,7 +1242,7 @@ class VibeApp(App):
             chat = self.query_one("#chat", VerticalScroll)
             chat.scroll_relative(y=-5, animate=False)
             self._auto_scroll = False
-        except Exception:
+        except NoMatches:
             pass
 
     def action_scroll_chat_down(self) -> None:
@@ -1209,7 +1251,7 @@ class VibeApp(App):
             chat.scroll_relative(y=5, animate=False)
             if self._is_scrolled_to_bottom(chat):
                 self._auto_scroll = True
-        except Exception:
+        except NoMatches:
             pass
 
     async def _show_dangerous_directory_warning(self) -> None:
@@ -1219,6 +1261,27 @@ class VibeApp(App):
                 f"⚠ WARNING: {reason}\n\nRunning in this location is not recommended."
             )
             await self._mount_and_scroll(WarningMessage(warning, show_border=False))
+
+    async def show_error_notification(
+        self,
+        message: str,
+        severity: str = "error",
+        timeout: float | None = None
+    ) -> None:
+        """Show an error notification banner.
+
+        Args:
+            message: The error message to display
+            severity: One of 'error', 'warning', 'info'
+            timeout: Auto-dismiss timeout in seconds (None = default 10s, 0 = no auto-dismiss)
+        """
+        if self._error_banner:
+            await self._error_banner.show_error(message, severity, timeout)
+
+    async def dismiss_error_notification(self) -> None:
+        """Dismiss the error notification banner."""
+        if self._error_banner:
+            await self._error_banner.dismiss()
 
     async def _finalize_current_streaming_message(self) -> None:
         if self._current_streaming_reasoning is not None:
@@ -1297,14 +1360,15 @@ class VibeApp(App):
         try:
             threshold = 3
             return scroll_view.scroll_y >= (scroll_view.max_scroll_y - threshold)
-        except Exception:
+        except (NoMatches, AttributeError):
+            # NoMatches if widget not found, AttributeError if scroll properties not available
             return True
 
     def _scroll_to_bottom(self) -> None:
         try:
             chat = self.query_one("#chat")
             chat.scroll_end(animate=False)
-        except Exception:
+        except NoMatches:
             pass
 
     def _scroll_to_bottom_deferred(self) -> None:
@@ -1318,7 +1382,7 @@ class VibeApp(App):
             if chat.max_scroll_y == 0:
                 return
             chat.anchor()
-        except Exception:
+        except NoMatches:
             pass
 
     def _schedule_update_notification(self) -> None:

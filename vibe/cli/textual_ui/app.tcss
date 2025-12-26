@@ -913,3 +913,70 @@ ContextProgress {
     margin: 0;
     color: $foreground;
 }
+
+/* Error Banner - dismissible notification */
+.error-banner {
+    width: 100%;
+    height: auto;
+    padding: 0 1;
+    margin: 0;
+}
+
+.error-banner-container {
+    width: 100%;
+    height: auto;
+    align: left middle;
+}
+
+.error-banner-icon {
+    width: auto;
+    height: auto;
+    margin-right: 1;
+    text-style: bold;
+}
+
+.error-banner-content {
+    width: 1fr;
+    height: auto;
+}
+
+.error-banner-dismiss-hint {
+    width: auto;
+    height: auto;
+    color: $text-muted;
+    margin-left: 2;
+}
+
+/* Severity-based coloring */
+.error-banner.severity-error {
+    background: $error 20%;
+    border-top: solid $error;
+    border-bottom: solid $error;
+}
+
+.error-banner.severity-error .error-banner-icon,
+.error-banner.severity-error .error-banner-content {
+    color: $error;
+}
+
+.error-banner.severity-warning {
+    background: $warning 20%;
+    border-top: solid $warning;
+    border-bottom: solid $warning;
+}
+
+.error-banner.severity-warning .error-banner-icon,
+.error-banner.severity-warning .error-banner-content {
+    color: $warning;
+}
+
+.error-banner.severity-info {
+    background: $primary 20%;
+    border-top: solid $primary;
+    border-bottom: solid $primary;
+}
+
+.error-banner.severity-info .error-banner-icon,
+.error-banner.severity-info .error-banner-content {
+    color: $primary;
+}
