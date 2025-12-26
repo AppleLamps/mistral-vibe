@@ -145,6 +145,9 @@ class Agent:
             config.effective_workdir,
         )
 
+        # Cache for ConversationContext to avoid creating duplicate objects
+        self._context_cache: tuple[tuple, ConversationContext] | None = None
+
     @property
     def mode(self) -> AgentMode:
         return self._mode
@@ -241,9 +244,31 @@ class Agent:
                 pass
 
     def _get_context(self) -> ConversationContext:
-        return ConversationContext(
+        """Get conversation context with lightweight caching.
+
+        Avoids creating duplicate ConversationContext objects when the underlying
+        data hasn't changed. Uses a simple cache key based on messages length,
+        stats steps, and object identities.
+        """
+        # Create cache key from messages list, stats, and config state
+        cache_key = (
+            id(self.messages),
+            len(self.messages),
+            id(self.stats),
+            self.stats.steps,
+            id(self.config),
+        )
+
+        # Return cached context if key matches
+        if self._context_cache is not None and self._context_cache[0] == cache_key:
+            return self._context_cache[1]
+
+        # Create new context and cache it
+        context = ConversationContext(
             messages=self.messages, stats=self.stats, config=self.config
         )
+        self._context_cache = (cache_key, context)
+        return context
 
     async def _conversation_loop(self, user_msg: str) -> AsyncGenerator[BaseEvent]:
         self.messages.append(LLMMessage(role=Role.user, content=user_msg))
@@ -361,9 +386,40 @@ class Agent:
         llm_result = await self._chat()
         return AssistantEvent(content=llm_result.message.content or "")
 
+    async def _execute_single_tool(
+        self, tool_instance: BaseTool, tool_call, tool_call_id: str
+    ) -> tuple[bool, Any, float, str | None]:
+        """Execute a single tool and return (success, result, duration, error).
+
+        Helper method for parallel tool execution.
+        """
+        try:
+            start_time = time.perf_counter()
+            result_model = await tool_instance.invoke(**tool_call.args_dict)
+            duration = time.perf_counter() - start_time
+            return (True, result_model, duration, None)
+
+        except (ToolError, ToolPermissionError) as exc:
+            error_msg = f"<{TOOL_ERROR_TAG}>{tool_instance.get_name()} failed: {exc}</{TOOL_ERROR_TAG}>"
+            return (False, None, 0.0, error_msg)
+
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # Re-raise cancellation exceptions
+            raise
+
+        except Exception as exc:
+            error_msg = f"<{TOOL_ERROR_TAG}>{tool_instance.get_name()} failed: {exc}</{TOOL_ERROR_TAG}>"
+            return (False, None, 0.0, error_msg)
+
     async def _handle_tool_calls(
         self, resolved: ResolvedMessage
     ) -> AsyncGenerator[ToolCallEvent | ToolResultEvent]:
+        """Handle tool calls with concurrent execution when possible.
+
+        Optimized to execute approved tools in parallel instead of sequentially.
+        This reduces total time from sum(all_tools) to max(slowest_tool) for independent tools.
+        """
+        # Handle failed calls first
         for failed in resolved.failed_calls:
             error_msg = f"<{TOOL_ERROR_TAG}>{failed.tool_name}: {failed.error}</{TOOL_ERROR_TAG}>"
 
@@ -381,7 +437,12 @@ class Agent:
                 )
             )
 
-        for tool_call in resolved.tool_calls:
+        if not resolved.tool_calls:
+            return
+
+        # Phase 1: Emit tool call events and check approvals (must be sequential for UX)
+        approved_tools = []
+        for idx, tool_call in enumerate(resolved.tool_calls):
             tool_call_id = tool_call.call_id
 
             yield ToolCallEvent(
@@ -391,6 +452,7 @@ class Agent:
                 tool_call_id=tool_call_id,
             )
 
+            # Get tool instance
             try:
                 tool_instance = self.tool_manager.get(tool_call.tool_name)
             except Exception as exc:
@@ -408,8 +470,10 @@ class Agent:
                         )
                     )
                 )
+                approved_tools.append(None)  # Placeholder to maintain index alignment
                 continue
 
+            # Check approval (must be sequential for interactive approval)
             decision = await self._should_execute_tool(
                 tool_instance, tool_call.validated_args, tool_call_id
             )
@@ -437,98 +501,128 @@ class Agent:
                         )
                     )
                 )
+                approved_tools.append(None)  # Placeholder to maintain index alignment
                 continue
 
+            # Tool approved - add to execution batch
             self.stats.tool_calls_agreed += 1
+            approved_tools.append((idx, tool_call, tool_instance, tool_call_id))
 
-            try:
-                start_time = time.perf_counter()
-                result_model = await tool_instance.invoke(**tool_call.args_dict)
-                duration = time.perf_counter() - start_time
+        # Phase 2: Execute approved tools in parallel
+        if not any(approved_tools):
+            return
 
-                text = "\n".join(
-                    f"{k}: {v}" for k, v in result_model.model_dump().items()
-                )
+        # Create tasks for all approved tools
+        execution_tasks = []
+        task_indices = []
+        for item in approved_tools:
+            if item is None:
+                execution_tasks.append(None)
+            else:
+                idx, tool_call, tool_instance, tool_call_id = item
+                task = self._execute_single_tool(tool_instance, tool_call, tool_call_id)
+                execution_tasks.append(task)
+                task_indices.append(idx)
 
-                self.messages.append(
-                    LLMMessage.model_validate(
-                        self.format_handler.create_tool_response_message(
-                            tool_call, text
+        # Execute approved tools concurrently
+        try:
+            # Gather only non-None tasks
+            non_none_tasks = [t for t in execution_tasks if t is not None]
+            if non_none_tasks:
+                results = await asyncio.gather(*non_none_tasks, return_exceptions=True)
+            else:
+                results = []
+
+            # Map results back to original indices
+            result_map = {}
+            result_idx = 0
+            for i, item in enumerate(approved_tools):
+                if item is not None:
+                    result_map[i] = results[result_idx]
+                    result_idx += 1
+
+            # Phase 3: Emit results in original order
+            for i, item in enumerate(approved_tools):
+                if item is None:
+                    continue
+
+                idx, tool_call, tool_instance, tool_call_id = item
+                result = result_map[i]
+
+                # Handle exceptions that occurred during execution
+                if isinstance(result, (asyncio.CancelledError, KeyboardInterrupt)):
+                    cancel = str(
+                        get_user_cancellation_message(CancellationReason.TOOL_INTERRUPTED)
+                    )
+                    yield ToolResultEvent(
+                        tool_name=tool_call.tool_name,
+                        tool_class=tool_call.tool_class,
+                        error=cancel,
+                        tool_call_id=tool_call_id,
+                    )
+                    self.messages.append(
+                        LLMMessage.model_validate(
+                            self.format_handler.create_tool_response_message(
+                                tool_call, cancel
+                            )
                         )
                     )
-                )
+                    raise result
 
-                yield ToolResultEvent(
-                    tool_name=tool_call.tool_name,
-                    tool_class=tool_call.tool_class,
-                    result=result_model,
-                    duration=duration,
-                    tool_call_id=tool_call_id,
-                )
+                # Unpack execution result
+                success, result_model, duration, error_msg = result
 
-                self.stats.tool_calls_succeeded += 1
+                if success:
+                    # Success case
+                    text = "\n".join(
+                        f"{k}: {v}" for k, v in result_model.model_dump().items()
+                    )
 
-            except asyncio.CancelledError:
-                cancel = str(
-                    get_user_cancellation_message(CancellationReason.TOOL_INTERRUPTED)
-                )
-                yield ToolResultEvent(
-                    tool_name=tool_call.tool_name,
-                    tool_class=tool_call.tool_class,
-                    error=cancel,
-                    tool_call_id=tool_call_id,
-                )
-                self.messages.append(
-                    LLMMessage.model_validate(
-                        self.format_handler.create_tool_response_message(
-                            tool_call, cancel
+                    self.messages.append(
+                        LLMMessage.model_validate(
+                            self.format_handler.create_tool_response_message(
+                                tool_call, text
+                            )
                         )
                     )
-                )
-                raise
 
-            except KeyboardInterrupt:
-                cancel = str(
-                    get_user_cancellation_message(CancellationReason.TOOL_INTERRUPTED)
-                )
-                yield ToolResultEvent(
-                    tool_name=tool_call.tool_name,
-                    tool_class=tool_call.tool_class,
-                    error=cancel,
-                    tool_call_id=tool_call_id,
-                )
-                self.messages.append(
-                    LLMMessage.model_validate(
-                        self.format_handler.create_tool_response_message(
-                            tool_call, cancel
-                        )
+                    yield ToolResultEvent(
+                        tool_name=tool_call.tool_name,
+                        tool_class=tool_call.tool_class,
+                        result=result_model,
+                        duration=duration,
+                        tool_call_id=tool_call_id,
                     )
-                )
-                raise
 
-            except (ToolError, ToolPermissionError) as exc:
-                error_msg = f"<{TOOL_ERROR_TAG}>{tool_instance.get_name()} failed: {exc}</{TOOL_ERROR_TAG}>"
+                    self.stats.tool_calls_succeeded += 1
 
-                yield ToolResultEvent(
-                    tool_name=tool_call.tool_name,
-                    tool_class=tool_call.tool_class,
-                    error=error_msg,
-                    tool_call_id=tool_call_id,
-                )
-
-                if isinstance(exc, ToolPermissionError):
-                    self.stats.tool_calls_agreed -= 1
-                    self.stats.tool_calls_rejected += 1
                 else:
-                    self.stats.tool_calls_failed += 1
-                self.messages.append(
-                    LLMMessage.model_validate(
-                        self.format_handler.create_tool_response_message(
-                            tool_call, error_msg
+                    # Error case
+                    yield ToolResultEvent(
+                        tool_name=tool_call.tool_name,
+                        tool_class=tool_call.tool_class,
+                        error=error_msg,
+                        tool_call_id=tool_call_id,
+                    )
+
+                    # Check if error was ToolPermissionError (encoded in error message)
+                    if "ToolPermissionError" in str(error_msg):
+                        self.stats.tool_calls_agreed -= 1
+                        self.stats.tool_calls_rejected += 1
+                    else:
+                        self.stats.tool_calls_failed += 1
+
+                    self.messages.append(
+                        LLMMessage.model_validate(
+                            self.format_handler.create_tool_response_message(
+                                tool_call, error_msg
+                            )
                         )
                     )
-                )
-                continue
+
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # Handle cancellation during parallel execution
+            raise
 
     async def _chat(self, max_tokens: int | None = None) -> LLMChunk:
         active_model = self.config.get_active_model()
@@ -697,46 +791,59 @@ class Agent:
         self._ensure_assistant_after_tools()
 
     def _fill_missing_tool_responses(self) -> None:
-        i = 1
-        while i < len(self.messages):  # noqa: PLR1702
+        """Fill in missing tool responses after assistant tool calls.
+
+        Optimized to O(n) by building a new list instead of using O(n) insertions.
+        """
+        if len(self.messages) < 2:
+            return
+
+        new_messages = []
+        i = 0
+
+        while i < len(self.messages):
             msg = self.messages[i]
+            new_messages.append(msg)
 
             if msg.role == "assistant" and msg.tool_calls:
                 expected_responses = len(msg.tool_calls)
 
                 if expected_responses > 0:
-                    actual_responses = 0
+                    # Collect actual tool responses that follow this assistant message
+                    actual_responses = []
                     j = i + 1
                     while j < len(self.messages) and self.messages[j].role == "tool":
-                        actual_responses += 1
+                        actual_responses.append(self.messages[j])
                         j += 1
 
-                    if actual_responses < expected_responses:
-                        insertion_point = i + 1 + actual_responses
+                    # Add the actual responses we found
+                    new_messages.extend(actual_responses)
 
-                        for call_idx in range(actual_responses, expected_responses):
-                            tool_call_data = msg.tool_calls[call_idx]
+                    # Add empty responses for any missing tool calls
+                    for call_idx in range(len(actual_responses), expected_responses):
+                        tool_call_data = msg.tool_calls[call_idx]
 
-                            empty_response = LLMMessage(
-                                role=Role.tool,
-                                tool_call_id=tool_call_data.id or "",
-                                name=(tool_call_data.function.name or "")
-                                if tool_call_data.function
-                                else "",
-                                content=str(
-                                    get_user_cancellation_message(
-                                        CancellationReason.TOOL_NO_RESPONSE
-                                    )
-                                ),
-                            )
+                        empty_response = LLMMessage(
+                            role=Role.tool,
+                            tool_call_id=tool_call_data.id or "",
+                            name=(tool_call_data.function.name or "")
+                            if tool_call_data.function
+                            else "",
+                            content=str(
+                                get_user_cancellation_message(
+                                    CancellationReason.TOOL_NO_RESPONSE
+                                )
+                            ),
+                        )
+                        new_messages.append(empty_response)
 
-                            self.messages.insert(insertion_point, empty_response)
-                            insertion_point += 1
-
-                    i = i + 1 + expected_responses
+                    # Skip past the tool responses we already added
+                    i = j
                     continue
 
             i += 1
+
+        self.messages = new_messages
 
     def _ensure_assistant_after_tools(self) -> None:
         MIN_MESSAGE_SIZE = 2
