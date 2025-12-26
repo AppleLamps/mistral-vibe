@@ -26,6 +26,10 @@ class GrepBackend(StrEnum):
     GNU_GREP = auto()
 
 
+# Cache backend detection result - backends don't change during execution
+_cached_backend: GrepBackend | None = None
+
+
 class GrepToolConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ALWAYS
 
@@ -105,10 +109,21 @@ class Grep(
     )
 
     def _detect_backend(self) -> GrepBackend:
+        """Detect available grep backend, caching result for performance.
+
+        Backend detection is cached at module level since available binaries
+        don't change during program execution.
+        """
+        global _cached_backend
+        if _cached_backend is not None:
+            return _cached_backend
+
         if shutil.which("rg"):
-            return GrepBackend.RIPGREP
+            _cached_backend = GrepBackend.RIPGREP
+            return _cached_backend
         if shutil.which("grep"):
-            return GrepBackend.GNU_GREP
+            _cached_backend = GrepBackend.GNU_GREP
+            return _cached_backend
         raise ToolError(
             "Neither ripgrep (rg) nor grep is installed. "
             "Please install ripgrep: https://github.com/BurntSushi/ripgrep#installation"
