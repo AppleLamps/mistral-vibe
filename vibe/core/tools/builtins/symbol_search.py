@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import fnmatch
 import os
+import re
 from enum import StrEnum, auto
 from pathlib import Path
 from typing import ClassVar, final
@@ -225,20 +227,29 @@ class SymbolSearch(
     def _collect_files(
         self, root: Path, language_filter: str | None
     ) -> list[Path]:
-        """Collect all supported files under a directory."""
-        import fnmatch
+        """Collect all supported files under a directory.
+
+        Uses pre-compiled regex patterns for faster exclusion matching.
+        This avoids O(n×m) fnmatch calls where n=files and m=patterns.
+        """
+        # Pre-compile exclude patterns to regex for faster matching
+        # fnmatch.translate converts glob patterns to regex
+        exclude_regexes = [
+            re.compile(fnmatch.translate(pat)) for pat in self.config.exclude_patterns
+        ]
+
+        def is_excluded(path_str: str) -> bool:
+            """Check if path matches any exclusion pattern using pre-compiled regex."""
+            return any(regex.match(path_str) for regex in exclude_regexes)
 
         files = []
 
         for dirpath, dirnames, filenames in os.walk(root):
-            # Filter out excluded directories
+            # Filter out excluded directories using pre-compiled patterns
             dirnames[:] = [
                 d
                 for d in dirnames
-                if not any(
-                    fnmatch.fnmatch(os.path.join(dirpath, d), pat)
-                    for pat in self.config.exclude_patterns
-                )
+                if not is_excluded(os.path.join(dirpath, d))
             ]
 
             for filename in filenames:
@@ -254,12 +265,9 @@ class SymbolSearch(
                     if file_lang != language_filter:
                         continue
 
-                # Check exclude patterns
+                # Check exclude patterns using pre-compiled regex
                 full_path = str(file_path)
-                if any(
-                    fnmatch.fnmatch(full_path, pat)
-                    for pat in self.config.exclude_patterns
-                ):
+                if is_excluded(full_path):
                     continue
 
                 files.append(file_path)
