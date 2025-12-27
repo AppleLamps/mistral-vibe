@@ -18,15 +18,21 @@ if TYPE_CHECKING:
 def walk_tree(node: Node) -> Generator[Node, None, None]:
     """Walk all nodes in a tree depth-first.
 
+    Uses an iterative approach with a stack to avoid the overhead
+    of creating a new generator frame for every node.
+
     Args:
         node: Starting node
 
     Yields:
         Each node in depth-first order
     """
-    yield node
-    for child in node.children:
-        yield from walk_tree(child)
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        # Add children in reverse order so leftmost child is processed first
+        stack.extend(reversed(current.children))
 
 
 def find_nodes_by_type(

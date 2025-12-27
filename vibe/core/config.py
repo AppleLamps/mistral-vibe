@@ -498,22 +498,22 @@ class VibeConfig(BaseSettings):
         )
 
     @model_validator(mode="after")
-    def _check_api_key(self) -> VibeConfig:
+    def _check_model_and_provider(self) -> VibeConfig:
+        """Validate API key and backend compatibility in one pass.
+
+        Combines checks to avoid redundant get_active_model() and
+        get_provider_for_model() lookups.
+        """
         try:
             active_model = self.get_active_model()
             provider = self.get_provider_for_model(active_model)
+
+            # Check API key
             api_key_env = provider.api_key_env_var
             if api_key_env and not os.getenv(api_key_env):
                 raise MissingAPIKeyError(api_key_env, provider.name)
-        except ValueError:
-            pass
-        return self
 
-    @model_validator(mode="after")
-    def _check_api_backend_compatibility(self) -> VibeConfig:
-        try:
-            active_model = self.get_active_model()
-            provider = self.get_provider_for_model(active_model)
+            # Check backend compatibility
             MISTRAL_API_BASES = [
                 "https://codestral.mistral.ai",
                 "https://api.mistral.ai",
