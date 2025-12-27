@@ -159,6 +159,8 @@ class SessionLoggingConfig(BaseSettings):
     include_providers: bool = True
     write_buffer_bytes: int = 64 * 1024
     include_context_snapshot: bool = False
+    # Human-readable conversation logs in .vibe_logs/ folder
+    conversation_log_enabled: bool = True
 
     @field_validator("save_dir", mode="before")
     @classmethod
@@ -310,7 +312,7 @@ DEFAULT_PROVIDERS = [
         api_key_env_var="OPENROUTER_API_KEY",
         backend=Backend.GENERIC,
         api_style="openai",
-        fetch_models=True,
+        fetch_models=False,
         extra_headers={
             "HTTP-Referer": "https://github.com/mistralai/mistral-vibe",
             "X-Title": "Mistral Vibe",
@@ -339,6 +341,52 @@ DEFAULT_MODELS = [
         alias="local",
         input_price=0.0,
         output_price=0.0,
+    ),
+    # OpenRouter models
+    ModelConfig(
+        name="x-ai/grok-code-fast-1",
+        provider="openrouter",
+        alias="or:grok-code-fast-1",
+    ),
+    ModelConfig(
+        name="x-ai/grok-4.1-fast",
+        provider="openrouter",
+        alias="or:grok-4.1-fast",
+    ),
+    ModelConfig(
+        name="z-ai/glm-4.7",
+        provider="openrouter",
+        alias="or:glm-4.7",
+    ),
+    ModelConfig(
+        name="nex-agi/deepseek-v3.1-nex-n1:free",
+        provider="openrouter",
+        alias="or:deepseek-v3.1-nex-n1",
+    ),
+    ModelConfig(
+        name="deepseek/deepseek-v3.2-speciale",
+        provider="openrouter",
+        alias="or:deepseek-v3.2-speciale",
+    ),
+    ModelConfig(
+        name="openai/gpt-oss-120b:exacto",
+        provider="openrouter",
+        alias="or:gpt-oss-120b",
+    ),
+    ModelConfig(
+        name="openai/gpt-5.1-codex-mini",
+        provider="openrouter",
+        alias="or:gpt-5.1-codex-mini",
+    ),
+    ModelConfig(
+        name="mistralai/devstral-2512:free",
+        provider="openrouter",
+        alias="or:devstral-2512",
+    ),
+    ModelConfig(
+        name="kwaipilot/kat-coder-pro:free",
+        provider="openrouter",
+        alias="or:kat-coder-pro",
     ),
 ]
 
@@ -411,6 +459,15 @@ class VibeConfig(BaseSettings):
         env_prefix="VIBE_", case_sensitive=False, extra="ignore"
     )
 
+    @model_validator(mode="after")
+    def _merge_default_models(self) -> VibeConfig:
+        """Ensure all DEFAULT_MODELS are included, merging with user-defined models."""
+        user_aliases = {m.alias for m in self.models}
+        for default_model in DEFAULT_MODELS:
+            if default_model.alias not in user_aliases:
+                self.models.append(default_model)
+        return self
+
     @property
     def effective_workdir(self) -> Path:
         return self.workdir if self.workdir is not None else Path.cwd()
@@ -451,28 +508,11 @@ class VibeConfig(BaseSettings):
         )
 
     async def get_all_models(self) -> list[ModelConfig]:
-        """Get all models including dynamically fetched ones from providers.
+        """Get all configured models.
 
-        Returns static models from config plus models fetched from providers
-        that have fetch_models=True (e.g., OpenRouter).
+        Returns the static models from config.
         """
-        from vibe.core.openrouter import OpenRouterGateway
-
-        models = list(self.models)
-        seen_aliases = {m.alias for m in models}
-
-        for provider in self.providers:
-            if provider.fetch_models and provider.name == "openrouter":
-                api_key = os.getenv(provider.api_key_env_var) if provider.api_key_env_var else None
-                if api_key:
-                    gateway = OpenRouterGateway()
-                    fetched = await gateway.fetch_models(api_key)
-                    for model in fetched:
-                        if model.alias not in seen_aliases:
-                            models.append(model)
-                            seen_aliases.add(model.alias)
-
-        return models
+        return list(self.models)
 
     @classmethod
     def settings_customise_sources(

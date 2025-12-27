@@ -706,13 +706,14 @@ WelcomeBanner {
     }
 }
 
+/* Config App Container */
 #config-app {
     width: 100%;
     height: auto;
-    max-height: 24;
+    max-height: 26;
     background: $background;
-    border: round $foreground-muted;
-    padding: 0 1;
+    border: round $primary 50%;
+    padding: 1 2;
     margin: 0 0 1 0;
 }
 
@@ -721,23 +722,37 @@ WelcomeBanner {
     height: auto;
 }
 
+.settings-title {
+    height: auto;
+    text-style: bold;
+    color: $primary;
+    margin-bottom: 1;
+}
+
+/* Form Rows */
 .settings-row {
     width: 100%;
     height: auto;
     align: left middle;
+    margin-bottom: 1;
 }
 
 .settings-row .settings-label {
     width: 10;
     height: auto;
+    color: $text-muted;
 }
 
 .settings-row Input {
     width: 1fr;
     height: auto;
-    border: none;
+    border: tall $surface-lighten-1;
     background: $surface;
     padding: 0 1;
+}
+
+.settings-row Input:focus {
+    border: tall $primary;
 }
 
 .settings-row Select {
@@ -747,44 +762,8 @@ WelcomeBanner {
 
 .settings-row Button {
     width: auto;
-    min-width: 8;
+    min-width: 6;
     margin-left: 1;
-}
-
-#model-count-label {
-    height: auto;
-    color: $text-muted;
-    margin-top: 1;
-}
-
-#model-list-scroll {
-    width: 100%;
-    height: auto;
-    max-height: 8;
-    border: solid $surface;
-    padding: 0;
-    margin: 0;
-    scrollbar-size: 1;
-}
-
-.model-item {
-    width: 100%;
-    height: auto;
-    padding: 0;
-}
-
-.model-selected {
-    color: $primary;
-    text-style: bold;
-    background: $surface;
-}
-
-.model-unselected {
-    color: $foreground;
-}
-
-.model-active {
-    color: $success;
 }
 
 .provider-filter {
@@ -792,15 +771,77 @@ WelcomeBanner {
 }
 
 #provider-filter {
-    max-width: 30;
+    max-width: 24;
 }
 
-.settings-title {
+.manual-row {
+    margin-top: 1;
+}
+
+/* Model Count */
+#model-count-label {
     height: auto;
-    text-style: bold;
-    color: $primary;
+    color: $text-muted;
+    text-style: italic;
+    margin: 1 0 0 0;
 }
 
+/* Model List Scroll */
+#model-list-scroll {
+    width: 100%;
+    height: auto;
+    max-height: 8;
+    border: solid $surface-lighten-1;
+    background: $surface;
+    padding: 0;
+    margin: 0;
+    scrollbar-size: 1 1;
+}
+
+/* Model Item - single clickable widget with Rich markup */
+.model-item {
+    width: 100%;
+    height: 1;
+    padding: 0 1;
+    background: transparent;
+}
+
+.model-item:hover {
+    background: $surface-lighten-1;
+}
+
+.model-item:focus {
+    background: $surface-lighten-2;
+    text-style: bold;
+}
+
+/* Highlighted (keyboard navigation) */
+.model-highlighted {
+    background: $primary 20%;
+    text-style: bold;
+}
+
+/* Active model row */
+.model-is-active {
+    background: $success 10%;
+}
+
+/* No Results */
+.no-results {
+    height: auto;
+    color: $text-muted;
+    text-style: italic;
+    padding: 1;
+}
+
+/* Help Text */
+.settings-help {
+    height: auto;
+    color: $text-muted;
+    margin-top: 1;
+}
+
+/* Legacy settings styles (keep for compatibility) */
 .settings-option {
     height: auto;
     color: $foreground;
@@ -836,11 +877,6 @@ WelcomeBanner {
 
 .settings-value-cycle-unselected {
     color: $primary;
-}
-
-.settings-help {
-    height: auto;
-    color: $text-muted;
 }
 
 #approval-app {

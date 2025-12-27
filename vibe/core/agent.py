@@ -10,6 +10,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from vibe.core.config import VibeConfig
+from vibe.core.conversation_logger import ConversationLogger
 from vibe.core.interaction_logger import InteractionLogger
 from vibe.core.llm.backend.factory import BACKEND_FACTORY
 from vibe.core.llm.format import APIToolFormatHandler, ResolvedMessage
@@ -150,6 +151,13 @@ class Agent:
             self.session_id,
             self.auto_approve,
             config.effective_workdir,
+        )
+
+        # Human-readable conversation logger for debugging
+        self.conversation_logger = ConversationLogger(
+            workdir=config.effective_workdir,
+            session_id=self.session_id,
+            enabled=config.session_logging.conversation_log_enabled,
         )
 
         # Cache for ConversationContext to avoid creating duplicate objects
@@ -300,6 +308,7 @@ class Agent:
 
     async def _conversation_loop(self, user_msg: str) -> AsyncGenerator[BaseEvent]:
         self.messages.append(LLMMessage(role=Role.user, content=user_msg))
+        await self.conversation_logger.log_user_message(user_msg)
         self.stats.steps += 1
         todo_reminder_sent = False
 
@@ -362,18 +371,33 @@ class Agent:
 
         finally:
             self._flush_new_messages()
+            await self.conversation_logger.log_session_end(self.stats)
             await self.interaction_logger.save_interaction(
                 self.messages, self.stats, self.config, self.tool_manager
             )
 
     async def _perform_llm_turn(self) -> AsyncGenerator[BaseEvent, None]:
+        full_content = ""
+        full_reasoning = ""
+
         if self.enable_streaming:
             async for event in self._stream_assistant_events():
+                if isinstance(event, AssistantEvent):
+                    full_content += event.content
+                elif isinstance(event, ReasoningEvent):
+                    full_reasoning += event.content
                 yield event
         else:
             assistant_event = await self._get_assistant_event()
             if assistant_event.content:
+                full_content = assistant_event.content
                 yield assistant_event
+
+        # Log the complete assistant response
+        if full_reasoning:
+            await self.conversation_logger.log_reasoning(full_reasoning)
+        if full_content:
+            await self.conversation_logger.log_assistant_message(full_content)
 
         last_message = self.messages[-1]
 
@@ -386,6 +410,27 @@ class Agent:
             return
 
         async for event in self._handle_tool_calls(resolved):
+            # Log tool events
+            if isinstance(event, ToolCallEvent):
+                await self.conversation_logger.log_tool_call(
+                    event.tool_name,
+                    event.args.model_dump() if event.args else {},
+                    event.tool_call_id,
+                )
+            elif isinstance(event, ToolResultEvent):
+                result_str = None
+                if event.result:
+                    result_str = "\n".join(
+                        f"{k}: {v}" for k, v in event.result.model_dump().items()
+                    )
+                await self.conversation_logger.log_tool_result(
+                    event.tool_name,
+                    result_str,
+                    event.error,
+                    event.skipped,
+                    event.skip_reason,
+                    event.duration,
+                )
             yield event
 
     async def _stream_assistant_events(
