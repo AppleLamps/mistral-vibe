@@ -1059,12 +1059,11 @@ class VibeApp(App):
 
         # Fetch all models including dynamically fetched ones (e.g., OpenRouter)
         all_models = await self.config.get_all_models()
-        model_aliases = [m.alias for m in all_models]
 
         config_app = ConfigApp(
             self.config,
             has_terminal_theme=self._terminal_theme is not None,
-            models=model_aliases,
+            models=all_models,
         )
         await bottom_container.mount(config_app)
         self._current_bottom_app = BottomApp.Config
