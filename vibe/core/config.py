@@ -189,6 +189,10 @@ class ProviderConfig(BaseModel):
     fetch_models: bool = False
 
 
+# Pre-compiled pattern for MCP name normalization
+_MCP_NAME_CLEANUP_PATTERN = re.compile(r"[^a-zA-Z0-9_-]")
+
+
 class _MCPBase(BaseModel):
     name: str = Field(description="Short alias used to prefix tool names")
     prompt: str | None = Field(
@@ -198,7 +202,7 @@ class _MCPBase(BaseModel):
     @field_validator("name", mode="after")
     @classmethod
     def normalize_name(cls, v: str) -> str:
-        normalized = re.sub(r"[^a-zA-Z0-9_-]", "_", v)
+        normalized = _MCP_NAME_CLEANUP_PATTERN.sub("_", v)
         normalized = normalized.strip("_-")
         return normalized[:256]
 
