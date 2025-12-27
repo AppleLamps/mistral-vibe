@@ -27,6 +27,39 @@ from vibe.core.utils import run_sync
 
 logger = getLogger("vibe")
 
+# Cache for discovered tool classes to avoid re-importing on every ToolManager init
+_tool_cache: dict[str, dict[str, type[BaseTool]]] = {}
+_tool_cache_mtimes: dict[str, dict[str, float]] = {}
+
+
+def _compute_cache_key(search_paths: list[Path]) -> str:
+    """Compute a cache key from search paths."""
+    return "|".join(str(p) for p in search_paths)
+
+
+def _get_file_mtimes(search_paths: list[Path]) -> dict[str, float]:
+    """Get modification times for all Python files in search paths."""
+    mtimes: dict[str, float] = {}
+    for base in search_paths:
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*.py"):
+            if path.is_file() and not path.name.startswith("_"):
+                try:
+                    mtimes[str(path)] = path.stat().st_mtime
+                except OSError:
+                    pass
+    return mtimes
+
+
+def _is_cache_valid(cache_key: str, current_mtimes: dict[str, float]) -> bool:
+    """Check if the cached tool classes are still valid."""
+    if cache_key not in _tool_cache_mtimes:
+        return False
+    cached_mtimes = _tool_cache_mtimes[cache_key]
+    # Cache is invalid if files changed, added, or removed
+    return cached_mtimes == current_mtimes
+
 
 class MCPServerStatus(BaseModel):
     name: str
@@ -60,10 +93,35 @@ class ToolManager:
         self._search_paths: list[Path] = self._compute_search_paths(config)
         self._mcp_status: list[MCPServerStatus] = []
 
-        self._available: dict[str, type[BaseTool]] = {
-            cls.get_name(): cls for cls in self._iter_tool_classes(self._search_paths)
-        }
+        self._available = self._get_cached_tools(self._search_paths)
         self._integrate_mcp()
+
+    @staticmethod
+    def _get_cached_tools(search_paths: list[Path]) -> dict[str, type[BaseTool]]:
+        """Get tool classes from cache or discover them if cache is stale.
+
+        Uses file modification times to detect when tool files have changed
+        and the cache needs to be invalidated.
+        """
+        cache_key = _compute_cache_key(search_paths)
+        current_mtimes = _get_file_mtimes(search_paths)
+
+        if _is_cache_valid(cache_key, current_mtimes):
+            logger.debug("Using cached tool classes for %d paths", len(search_paths))
+            return dict(_tool_cache[cache_key])
+
+        # Cache miss or stale - discover tools
+        logger.debug("Discovering tools from %d paths", len(search_paths))
+        tools = {
+            cls.get_name(): cls
+            for cls in ToolManager._iter_tool_classes(search_paths)
+        }
+
+        # Update cache
+        _tool_cache[cache_key] = tools
+        _tool_cache_mtimes[cache_key] = current_mtimes
+
+        return dict(tools)
 
     @staticmethod
     def _compute_search_paths(config: VibeConfig) -> list[Path]:
@@ -136,10 +194,12 @@ class ToolManager:
         if search_paths is None:
             search_paths = [DEFAULT_TOOL_DIR.path]
 
+        # Use cached tool discovery
+        tools = ToolManager._get_cached_tools(search_paths)
+
         defaults: dict[str, dict[str, Any]] = {}
-        for cls in ToolManager._iter_tool_classes(search_paths):
+        for tool_name, cls in tools.items():
             try:
-                tool_name = cls.get_name()
                 config_class = cls._get_tool_config_class()
                 defaults[tool_name] = config_class().model_dump(exclude_none=True)
             except Exception as e:

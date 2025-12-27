@@ -119,15 +119,19 @@ class MistralMapper:
         if isinstance(content, str):
             return ParsedContent(content=content, reasoning_content=None)
 
-        concat_content = ""
-        concat_reasoning = ""
+        # Use list accumulation + join to avoid O(n²) string concatenation
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         for chunk in content:
             if isinstance(chunk, mistralai.FileChunk):
                 continue
             if isinstance(chunk, mistralai.TextChunk):
-                concat_content += chunk.text
+                content_parts.append(chunk.text)
             elif isinstance(chunk, mistralai.ThinkChunk):
-                concat_reasoning += self._extract_thinking_text(chunk)
+                reasoning_parts.append(self._extract_thinking_text(chunk))
+
+        concat_content = "".join(content_parts)
+        concat_reasoning = "".join(reasoning_parts)
         return ParsedContent(
             content=concat_content,
             reasoning_content=concat_reasoning if concat_reasoning else None,

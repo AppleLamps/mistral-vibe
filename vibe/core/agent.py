@@ -155,6 +155,11 @@ class Agent:
         # Cache for ConversationContext to avoid creating duplicate objects
         self._context_cache: tuple[tuple, ConversationContext] | None = None
 
+        # Incremental tracking for session state (used during compaction)
+        self._modified_files: set[str] = set()
+        self._recent_errors: list[str] = []
+        self._successful_tools: list[str] = []
+
     @property
     def mode(self) -> AgentMode:
         return self._mode
@@ -704,6 +709,12 @@ class Agent:
 
             self.stats.tool_calls_succeeded += 1
 
+            # Track file modifications incrementally for session state
+            if tool_call.tool_name in ("write_file", "search_replace", "patch_file"):
+                if hasattr(result_model, "path"):
+                    self._modified_files.add(str(result_model.path))
+            self._successful_tools.append(tool_call.tool_name)
+
         else:
             # Error case
             yield ToolResultEvent(
@@ -727,6 +738,13 @@ class Agent:
                     )
                 )
             )
+
+            # Track errors incrementally for session state
+            error_summary = (error_msg or "unknown error")[:200]
+            self._recent_errors.append(f"{tool_call.tool_name}: {error_summary}")
+            # Keep only recent errors to avoid unbounded growth
+            if len(self._recent_errors) > 10:
+                self._recent_errors = self._recent_errors[-10:]
 
     async def _chat(self, max_tokens: int | None = None) -> LLMChunk:
         active_model = self.config.get_active_model()
@@ -993,56 +1011,32 @@ class Agent:
     def _extract_session_state_for_compact(self) -> str:
         """Extract important session state to preserve during compaction.
 
+        Uses incrementally tracked state from tool execution instead of
+        scanning all messages, providing O(1) instead of O(n) performance.
+
         Gathers information about:
         - Files modified during the session
         - Recent tool execution results
         - Any errors encountered
         """
-        modified_files: set[str] = set()
-        recent_errors: list[str] = []
-        successful_tools: list[str] = []
-
-        # Scan messages for tool calls and their results
-        for msg in self.messages:
-            if msg.role == Role.tool and msg.content:
-                content = msg.content
-                tool_name = msg.name or "unknown"
-
-                # Check for file modifications
-                if tool_name in ("write_file", "search_replace"):
-                    # Extract file path from content if present
-                    if "file:" in content.lower():
-                        for line in content.split("\n"):
-                            if line.lower().startswith("file:"):
-                                file_path = line.split(":", 1)[-1].strip()
-                                if file_path:
-                                    modified_files.add(file_path)
-
-                # Track errors
-                if "<tool_error>" in content or "failed:" in content.lower():
-                    error_summary = content[:200] + "..." if len(content) > 200 else content
-                    recent_errors.append(f"{tool_name}: {error_summary}")
-                else:
-                    successful_tools.append(tool_name)
-
-        # Build context summary
+        # Build context summary using incrementally tracked state
         context_parts: list[str] = []
 
-        if modified_files:
-            files_list = ", ".join(sorted(modified_files)[:10])
-            if len(modified_files) > 10:
-                files_list += f" (+{len(modified_files) - 10} more)"
+        if self._modified_files:
+            files_list = ", ".join(sorted(self._modified_files)[:10])
+            if len(self._modified_files) > 10:
+                files_list += f" (+{len(self._modified_files) - 10} more)"
             context_parts.append(f"Files modified this session: {files_list}")
 
-        if recent_errors:
+        if self._recent_errors:
             # Only include last 3 errors to avoid bloat
-            errors_summary = "; ".join(recent_errors[-3:])
+            errors_summary = "; ".join(self._recent_errors[-3:])
             context_parts.append(f"Recent errors: {errors_summary}")
 
-        if successful_tools:
+        if self._successful_tools:
             # Summarize tool usage
             tool_counts: dict[str, int] = {}
-            for tool in successful_tools:
+            for tool in self._successful_tools:
                 tool_counts[tool] = tool_counts.get(tool, 0) + 1
             tools_summary = ", ".join(f"{t}({c})" for t, c in sorted(tool_counts.items())[:5])
             context_parts.append(f"Tools used: {tools_summary}")

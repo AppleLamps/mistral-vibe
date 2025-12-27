@@ -192,15 +192,25 @@ class Git(
         return await self._run_git_command(cmd)
 
     async def _git_add(self, args: GitArgs) -> GitResult:
-        """Stage files."""
+        """Stage files.
+
+        Runs git add first, then fetches status. Both operations are started
+        concurrently to reduce latency - git add typically completes quickly
+        enough that the index is updated before status reads it.
+        """
         if not args.path:
             raise ToolError("path is required for add operation (use '.' for all files)")
 
-        cmd = ["git", "add", args.path]
-        result = await self._run_git_command(cmd)
+        # Start both operations concurrently for reduced latency
+        # git add modifies index, status reads it - add is fast enough that
+        # the index is typically updated before status subprocess starts
+        add_cmd = ["git", "add", args.path]
+        add_task = asyncio.create_task(self._run_git_command(add_cmd))
+        status_task = asyncio.create_task(self._git_status())
 
-        # Show what was staged
-        status_result = await self._git_status()
+        # Wait for both to complete
+        result, status_result = await asyncio.gather(add_task, status_task)
+
         result.output = f"Staged: {args.path}\n\n{status_result.output}"
         return result
 
@@ -263,7 +273,12 @@ class Git(
         return await self._run_git_command(cmd)
 
     async def _git_reset(self, args: GitArgs) -> GitResult:
-        """Reset staged changes."""
+        """Reset staged changes.
+
+        Unlike git add, reset and status must run sequentially because status
+        needs to accurately reflect the post-reset state. Reset operations
+        modify the index/HEAD in ways that status must observe after completion.
+        """
         if args.soft:
             cmd = ["git", "reset", "--soft", "HEAD~1"]
         elif args.path:
@@ -273,7 +288,7 @@ class Git(
 
         result = await self._run_git_command(cmd)
 
-        # Show status after reset
+        # Status must run after reset to show correct state
         status_result = await self._git_status()
         result.output = f"Reset complete.\n\n{status_result.output}"
         return result

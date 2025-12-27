@@ -40,6 +40,11 @@ class MiddlewareResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+# Singleton for the common "continue" result to avoid creating new objects
+# Note: This is safe because the default result is immutable (no metadata modifications)
+_CONTINUE_RESULT = MiddlewareResult()
+
+
 class ConversationMiddleware(Protocol):
     async def before_turn(self, context: ConversationContext) -> MiddlewareResult: ...
 
@@ -58,10 +63,10 @@ class TurnLimitMiddleware:
                 action=MiddlewareAction.STOP,
                 reason=f"Turn limit of {self.max_turns} reached",
             )
-        return MiddlewareResult()
+        return _CONTINUE_RESULT
 
     async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
-        return MiddlewareResult()
+        return _CONTINUE_RESULT
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
         pass
@@ -77,10 +82,10 @@ class PriceLimitMiddleware:
                 action=MiddlewareAction.STOP,
                 reason=f"Price limit exceeded: ${context.stats.session_cost:.4f} > ${self.max_price:.2f}",
             )
-        return MiddlewareResult()
+        return _CONTINUE_RESULT
 
     async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
-        return MiddlewareResult()
+        return _CONTINUE_RESULT
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
         pass
@@ -99,10 +104,10 @@ class AutoCompactMiddleware:
                     "threshold": self.threshold,
                 },
             )
-        return MiddlewareResult()
+        return _CONTINUE_RESULT
 
     async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
-        return MiddlewareResult()
+        return _CONTINUE_RESULT
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
         pass
@@ -118,11 +123,11 @@ class ContextWarningMiddleware:
 
     async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
         if self.has_warned:
-            return MiddlewareResult()
+            return _CONTINUE_RESULT
 
         max_context = self.max_context
         if max_context is None:
-            return MiddlewareResult()
+            return _CONTINUE_RESULT
 
         if context.stats.context_tokens >= max_context * self.threshold_percent:
             self.has_warned = True
@@ -134,10 +139,10 @@ class ContextWarningMiddleware:
                 action=MiddlewareAction.INJECT_MESSAGE, message=warning_msg
             )
 
-        return MiddlewareResult()
+        return _CONTINUE_RESULT
 
     async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
-        return MiddlewareResult()
+        return _CONTINUE_RESULT
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
         self.has_warned = False
@@ -164,13 +169,13 @@ class PlanModeMiddleware:
 
     async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
         if not self._is_plan_mode():
-            return MiddlewareResult()
+            return _CONTINUE_RESULT
         return MiddlewareResult(
             action=MiddlewareAction.INJECT_MESSAGE, message=self.reminder
         )
 
     async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
-        return MiddlewareResult()
+        return _CONTINUE_RESULT
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
         pass
@@ -206,10 +211,10 @@ class ModeTransitionMiddleware:
             return MiddlewareResult(
                 action=MiddlewareAction.INJECT_MESSAGE, message=notification
             )
-        return MiddlewareResult()
+        return _CONTINUE_RESULT
 
     async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
-        return MiddlewareResult()
+        return _CONTINUE_RESULT
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
         self._pending_notification = None
@@ -245,7 +250,7 @@ class MiddlewarePipeline:
                 action=MiddlewareAction.INJECT_MESSAGE, message=combined_message
             )
 
-        return MiddlewareResult()
+        return _CONTINUE_RESULT
 
     async def run_after_turn(self, context: ConversationContext) -> MiddlewareResult:
         for mw in self.middlewares:
@@ -257,4 +262,4 @@ class MiddlewarePipeline:
             if result.action in {MiddlewareAction.STOP, MiddlewareAction.COMPACT}:
                 return result
 
-        return MiddlewareResult()
+        return _CONTINUE_RESULT

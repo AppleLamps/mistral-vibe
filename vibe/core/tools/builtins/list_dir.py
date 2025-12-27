@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import os
 from datetime import datetime
 from pathlib import Path
@@ -104,8 +105,6 @@ def _format_size(size: int) -> str:
 
 def _should_exclude(name: str, exclude_patterns: list[str]) -> bool:
     """Check if a name matches any exclusion pattern."""
-    import fnmatch
-
     for pattern in exclude_patterns:
         if fnmatch.fnmatch(name, pattern):
             return True

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,15 +18,21 @@ if TYPE_CHECKING:
 def walk_tree(node: Node) -> Generator[Node, None, None]:
     """Walk all nodes in a tree depth-first.
 
+    Uses an iterative approach with a stack to avoid the overhead
+    of creating a new generator frame for every node.
+
     Args:
         node: Starting node
 
     Yields:
         Each node in depth-first order
     """
-    yield node
-    for child in node.children:
-        yield from walk_tree(child)
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        # Add children in reverse order so leftmost child is processed first
+        stack.extend(reversed(current.children))
 
 
 def find_nodes_by_type(
@@ -693,10 +700,37 @@ def _node_type_to_kind(node_type: str) -> str:
     return mapping.get(node_type, node_type)
 
 
+@lru_cache(maxsize=100)
+def _read_file_lines_cached(file_path: str) -> tuple[str, ...]:
+    """Cache file contents to avoid redundant reads.
+
+    Uses string path as key since Path objects are not hashable for lru_cache.
+    Returns a tuple (immutable) for cache safety.
+
+    Args:
+        file_path: String path to the file
+
+    Returns:
+        Tuple of file lines, or empty tuple on error
+    """
+    try:
+        return tuple(Path(file_path).read_text(encoding="utf-8", errors="replace").splitlines())
+    except OSError:
+        return ()
+
+
+def clear_file_cache() -> None:
+    """Clear the file content cache. Useful after file modifications."""
+    _read_file_lines_cached.cache_clear()
+
+
 def get_context_lines(
     file_path: Path, line: int, context_before: int = 2, context_after: int = 2
 ) -> str:
     """Get lines of context around a given line.
+
+    Uses caching to avoid redundant file reads when the same file is accessed
+    multiple times (e.g., multiple symbol matches in the same file).
 
     Args:
         file_path: Path to the file
@@ -707,9 +741,9 @@ def get_context_lines(
     Returns:
         Context string with line numbers
     """
-    try:
-        lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
+    # Use cached file reading - convert Path to str for hashability
+    lines = _read_file_lines_cached(str(file_path.resolve()))
+    if not lines:
         return ""
 
     start = max(0, line - 1 - context_before)
