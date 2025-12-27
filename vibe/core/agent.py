@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncGenerator, Callable
 from enum import StrEnum, auto
 import time
 from typing import Any, cast
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel
 
@@ -118,6 +121,9 @@ class Agent:
         self.backend_factory = lambda: backend or self._select_backend()
         self.backend = self.backend_factory()
 
+        # Inject parent context into Task tool for sub-agent spawning
+        self._inject_task_tool_context()
+
         self.message_observer = message_observer
         self._last_observed_message_index: int = 0
         self.middleware_pipeline = MiddlewarePipeline()
@@ -181,6 +187,43 @@ class Agent:
         provider = self.config.get_provider_for_model(active_model)
         timeout = self.config.api_timeout
         return BACKEND_FACTORY[provider.backend](provider=provider, timeout=timeout)
+
+    def _inject_task_tool_context(self) -> None:
+        """Inject parent agent context into Task tool for sub-agent spawning."""
+        try:
+            from vibe.core.tools.builtins.task import Task
+
+            available = self.tool_manager.available_tools()
+            logger.debug(
+                "Available tools (%d): %s",
+                len(available),
+                ", ".join(sorted(available)[:20]) + ("..." if len(available) > 20 else ""),
+            )
+
+            # Check if Task tool is available
+            if "task" not in available:
+                logger.warning(
+                    "Task tool NOT available. Sub-agent spawning disabled. "
+                    "Check if task.py exists in tools/builtins/"
+                )
+                return
+
+            # Get or create the task tool instance
+            task_tool = self.tool_manager.get("task")
+            if isinstance(task_tool, Task):
+                task_tool._parent_config = self.config
+                task_tool._parent_backend = self.backend
+                logger.info(
+                    "Task tool context injected successfully. "
+                    "Sub-agent spawning is enabled."
+                )
+            else:
+                logger.warning(
+                    "Task tool found but is wrong type: %s",
+                    type(task_tool).__name__,
+                )
+        except Exception as e:
+            logger.warning("Failed to inject Task tool context: %s", e)
 
     def add_message(self, message: LLMMessage) -> None:
         self.messages.append(message)

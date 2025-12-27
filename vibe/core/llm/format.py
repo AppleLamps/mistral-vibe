@@ -222,11 +222,15 @@ class APIToolFormatHandler:
         for parsed_call in parsed.tool_calls:
             tool_class = active_tools.get(parsed_call.tool_name)
             if not tool_class:
+                available_tool_names = sorted(active_tools.keys())
+                tools_hint = ", ".join(available_tool_names[:15])
+                if len(available_tool_names) > 15:
+                    tools_hint += f", ... ({len(available_tool_names)} total)"
                 failed_calls.append(
                     FailedToolCall(
                         tool_name=parsed_call.tool_name,
                         call_id=parsed_call.call_id,
-                        error=f"Unknown tool '{parsed_call.tool_name}'",
+                        error=f"Unknown tool '{parsed_call.tool_name}'. Available tools: {tools_hint}",
                     )
                 )
                 continue
