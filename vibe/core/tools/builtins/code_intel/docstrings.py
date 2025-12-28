@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import deque
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -108,7 +109,7 @@ class DocstringExtractor:
         """Extract doc comment preceding a definition."""
         # Look for comments immediately before the node
         prev_sibling = node.prev_sibling
-        comments = []
+        comments = deque()
 
         # Scan backwards for doc comments
         while prev_sibling:
@@ -131,7 +132,7 @@ class DocstringExtractor:
                     is_doc_comment = True
 
                 if is_doc_comment:
-                    comments.insert(0, text)
+                    comments.appendleft(text)
                     prev_sibling = prev_sibling.prev_sibling
                     continue
 
@@ -151,7 +152,7 @@ class DocstringExtractor:
             prev_sibling = prev_sibling.prev_sibling
 
         if comments:
-            return self._clean_line_comments(comments)
+            return self._clean_line_comments(list(comments))
 
         return None
 

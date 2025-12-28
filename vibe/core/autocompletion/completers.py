@@ -249,17 +249,8 @@ class MultiCompleter(Completer):
     def get_completions(self, text: str, cursor_pos: int) -> list[str]:
         all_completions = []
         for completer in self.completers:
-            completions = completer.get_completions(text, cursor_pos)
-            all_completions.extend(completions)
-
-        seen = set()
-        unique = []
-        for comp in all_completions:
-            if comp not in seen:
-                seen.add(comp)
-                unique.append(comp)
-
-        return unique
+            all_completions.extend(completer.get_completions(text, cursor_pos))
+        return list(dict.fromkeys(all_completions))
 
     def get_replacement_range(
         self, text: str, cursor_pos: int

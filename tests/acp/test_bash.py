@@ -195,10 +195,13 @@ class TestAcpBashExecution:
         with pytest.raises(ToolError) as exc_info:
             await tool.run(args)
 
-        assert (
-            str(exc_info.value)
-            == "Command failed: 'test_command'\nReturn code: 1\nStdout: error: command failed"
-        )
+        error_message = str(exc_info.value)
+        # Check that the core error information is present
+        assert "Command failed: 'test_command'" in error_message
+        assert "Return code: 1" in error_message
+        assert "Stdout: error: command failed" in error_message
+        # Verify correction suggestions are also included
+        assert "Correction suggestions:" in error_message
 
     @pytest.mark.asyncio
     async def test_run_create_terminal_failure(

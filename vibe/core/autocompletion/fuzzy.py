@@ -159,12 +159,17 @@ def _calculate_score(
     else:
         base_score -= indices[0] * 2
 
-    consecutive_bonus = sum(
-        10.0 for i in range(len(indices) - 1) if indices[i + 1] == indices[i] + 1
-    )
-
+    consecutive_bonus = 0.0
     boundary_bonus = 0.0
-    for idx in indices:
+    case_bonus = 0.0
+    gap_penalty = 0.0
+
+    for i, idx in enumerate(indices):
+        # Consecutive bonus: check if current index is consecutive with previous
+        if i > 0 and idx == indices[i - 1] + 1:
+            consecutive_bonus += 10.0
+
+        # Boundary bonus: word boundaries and case changes
         if idx == 0 or text_lower[idx - 1] in "/-_.":
             boundary_bonus += 5.0
         elif text_original[idx].isupper() and (
@@ -172,17 +177,17 @@ def _calculate_score(
         ):
             boundary_bonus += 3.0
 
-    case_bonus = sum(
-        2.0
-        for i, text_idx in enumerate(indices)
-        if i < len(pattern_original)
-        and text_idx < len(text_original)
-        and pattern_original[i] == text_original[text_idx]
-    )
+        # Case bonus: matching case between pattern and text
+        if (
+            i < len(pattern_original)
+            and idx < len(text_original)
+            and pattern_original[i] == text_original[idx]
+        ):
+            case_bonus += 2.0
 
-    gap_penalty = sum(
-        (indices[i + 1] - indices[i] - 1) * 1.5 for i in range(len(indices) - 1)
-    )
+        # Gap penalty: penalize gaps between matches
+        if i > 0:
+            gap_penalty += (idx - indices[i - 1] - 1) * 1.5
 
     return max(
         0.0, base_score + consecutive_bonus + boundary_bonus + case_bonus - gap_penalty

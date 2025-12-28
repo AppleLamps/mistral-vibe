@@ -361,6 +361,8 @@ class VibeAcpAgent(AcpAgent):
         ]
         self._last_active_model = params.modelId
 
+        VibeConfig.save_updates({"active_model": params.modelId})
+
         return SetSessionModelResponse()
 
     @override
