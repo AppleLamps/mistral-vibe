@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
+import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 import uuid
 
 from vibe.core.config import VibeConfig
 from vibe.core.interaction_logger import InteractionLogger
 from vibe.core.modes import AgentMode
-from vibe.core.types import AgentStats, LLMMessage, Role
+from vibe.core.types import LLMMessage, Role
 from vibe.web.schemas import ChatMessage, SessionDetail, SessionSummary
 
 if TYPE_CHECKING:
     from vibe.core.agent import Agent
+
+logger = logging.getLogger(__name__)
+
+# Default session TTL: 24 hours
+DEFAULT_SESSION_TTL_SECONDS = 24 * 60 * 60
 
 
 class WebSession:
@@ -37,18 +43,16 @@ class WebSession:
         self.messages: list[LLMMessage] = []
         self.chat_messages: list[ChatMessage] = []
         # Pending approvals keyed by tool_call_id: (event, response)
-        self._pending_approvals: dict[str, tuple[asyncio.Event, tuple[bool, bool] | None]] = {}
+        self._pending_approvals: dict[
+            str, tuple[asyncio.Event, tuple[bool, bool] | None]
+        ] = {}
 
     async def get_or_create_agent(self) -> Agent:
         """Get existing agent or create a new one."""
         if self.agent is None:
             from vibe.core.agent import Agent
 
-            self.agent = Agent(
-                self.config,
-                mode=self.mode,
-                enable_streaming=True,
-            )
+            self.agent = Agent(self.config, mode=self.mode, enable_streaming=True)
             # Restore messages if any
             if self.messages:
                 non_system = [m for m in self.messages if m.role != Role.system]
@@ -118,6 +122,7 @@ class WebSession:
             updated_at=self.updated_at,
             messages=self.chat_messages,
             stats=stats,
+            mode=self.mode.value,
         )
 
 
@@ -130,9 +135,7 @@ class WebSessionManager:
         self._lock = asyncio.Lock()
 
     async def create_session(
-        self,
-        name: str | None = None,
-        mode: AgentMode = AgentMode.DEFAULT,
+        self, name: str | None = None, mode: AgentMode = AgentMode.DEFAULT
     ) -> WebSession:
         """Create a new session."""
         session_id = str(uuid.uuid4())
@@ -140,10 +143,7 @@ class WebSessionManager:
             name = f"Chat {datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
         session = WebSession(
-            session_id=session_id,
-            name=name,
-            config=self.config,
-            mode=mode,
+            session_id=session_id, name=name, config=self.config, mode=mode
         )
 
         async with self._lock:
@@ -212,7 +212,9 @@ class WebSessionManager:
                     preview = str(msg["content"])[:100]
                     break
 
-            created = datetime.fromisoformat(start_time) if start_time else datetime.now()
+            created = (
+                datetime.fromisoformat(start_time) if start_time else datetime.now()
+            )
             updated = datetime.fromisoformat(end_time) if end_time else created
 
             return SessionSummary(
@@ -306,15 +308,83 @@ class WebSessionManager:
         if session.agent is None:
             return
 
-        logger = InteractionLogger(
+        interaction_logger = InteractionLogger(
             session_config=self.config.session_logging,
             session_id=session.session_id,
             auto_approve=session.mode == AgentMode.AUTO_APPROVE,
         )
 
-        await logger.save_interaction(
+        await interaction_logger.save_interaction(
             messages=session.agent.messages,
             stats=session.agent.stats,
             config=self.config,
             tool_manager=session.agent.tool_manager,
         )
+
+    async def cleanup_expired_sessions(
+        self, ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS
+    ) -> int:
+        """Clean up sessions that haven't been accessed within the TTL.
+
+        Args:
+            ttl_seconds: Time-to-live in seconds. Sessions not accessed within
+                this period will be removed.
+
+        Returns:
+            Number of sessions cleaned up.
+        """
+        now = datetime.now()
+        cutoff = now - timedelta(seconds=ttl_seconds)
+        cleaned = 0
+
+        async with self._lock:
+            expired_ids = [
+                session_id
+                for session_id, session in self._active_sessions.items()
+                if session.updated_at < cutoff
+            ]
+
+            for session_id in expired_ids:
+                session = self._active_sessions.pop(session_id)
+                # Try to save before cleanup
+                try:
+                    await self.save_session(session)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to save session %s before cleanup: %s", session_id, e
+                    )
+                cleaned += 1
+                logger.info("Cleaned up expired session: %s", session_id)
+
+        return cleaned
+
+    async def start_cleanup_task(
+        self,
+        interval_seconds: int = 3600,
+        ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS,
+    ) -> asyncio.Task[None]:
+        """Start a background task to periodically clean up expired sessions.
+
+        Args:
+            interval_seconds: How often to run cleanup (default: 1 hour).
+            ttl_seconds: Session TTL (default: 24 hours).
+
+        Returns:
+            The cleanup task.
+        """
+
+        async def cleanup_loop() -> None:
+            while True:
+                try:
+                    await asyncio.sleep(interval_seconds)
+                    cleaned = await self.cleanup_expired_sessions(ttl_seconds)
+                    if cleaned > 0:
+                        logger.info(
+                            "Session cleanup: removed %d expired sessions", cleaned
+                        )
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error("Session cleanup error: %s", e)
+
+        return asyncio.create_task(cleanup_loop())
