@@ -175,6 +175,16 @@ class SessionLoggingConfig(BaseSettings):
         return str(Path(v).expanduser().resolve())
 
 
+class WebConfig(BaseSettings):
+    """Configuration for the web interface."""
+
+    host: str = "127.0.0.1"
+    port: int = 8080
+    open_browser: bool = True
+    api_key: str = ""
+    cors_origins: list[str] = ["http://localhost:*", "http://127.0.0.1:*"]
+
+
 class Backend(StrEnum):
     MISTRAL = auto()
     GENERIC = auto()
@@ -416,6 +426,7 @@ class VibeConfig(BaseSettings):
 
     project_context: ProjectContextConfig = Field(default_factory=ProjectContextConfig)
     session_logging: SessionLoggingConfig = Field(default_factory=SessionLoggingConfig)
+    web: WebConfig = Field(default_factory=WebConfig)
     tools: dict[str, BaseToolConfig] = Field(default_factory=dict)
     tool_paths: list[Path] = Field(
         default_factory=list,

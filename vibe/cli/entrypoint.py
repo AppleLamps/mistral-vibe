@@ -93,6 +93,41 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
 
+    # Web interface arguments
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        default=False,
+        help="Start web interface instead of terminal UI.",
+    )
+    parser.add_argument(
+        "--web-port",
+        type=int,
+        default=8080,
+        metavar="PORT",
+        help="Port for web interface (default: 8080).",
+    )
+    parser.add_argument(
+        "--web-host",
+        type=str,
+        default="127.0.0.1",
+        metavar="HOST",
+        help="Host for web interface (default: 127.0.0.1).",
+    )
+    parser.add_argument(
+        "--web-no-browser",
+        action="store_true",
+        default=False,
+        help="Don't automatically open browser when starting web interface.",
+    )
+    parser.add_argument(
+        "--web-api-key",
+        type=str,
+        default=None,
+        metavar="KEY",
+        help="Optional API key for web interface authentication.",
+    )
+
     continuation_group = parser.add_mutually_exclusive_group()
     continuation_group.add_argument(
         "-c",
@@ -135,6 +170,25 @@ def check_and_resolve_trusted_folder() -> None:
 
 def main() -> None:
     args = parse_arguments()
+
+    # Handle web mode
+    if args.web:
+        unlock_config_paths()
+        try:
+            from vibe.web import run_server
+
+            rprint(f"[green]Starting Mistral Vibe Web on http://{args.web_host}:{args.web_port}[/]")
+            run_server(
+                host=args.web_host,
+                port=args.web_port,
+                open_browser=not args.web_no_browser,
+                api_key=args.web_api_key,
+            )
+        except ImportError as e:
+            rprint("[red]Web dependencies not installed.[/]")
+            rprint("[yellow]Install with: pip install mistral-vibe[web][/]")
+            sys.exit(1)
+        return
 
     is_interactive = args.prompt is None
     if is_interactive:

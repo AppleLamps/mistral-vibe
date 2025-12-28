@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mistral Vibe</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <!-- Markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Syntax highlighting -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <span class="logo-icon">V</span>
+                    <span class="logo-text">Mistral Vibe</span>
+                </div>
+                <span class="version">Web</span>
+            </div>
+
+            <button class="new-session-btn" id="newSessionBtn">
+                <span class="btn-icon">+</span>
+                New Chat
+            </button>
+
+            <div class="sessions-section">
+                <h3 class="sessions-title">Sessions</h3>
+                <div class="sessions-list" id="sessionsList">
+                    <!-- Sessions will be populated here -->
+                </div>
+            </div>
+
+            <div class="sidebar-footer">
+                <div class="model-info" id="modelInfo">
+                    <span class="model-label">Model:</span>
+                    <span class="model-name">Loading...</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Welcome screen (shown when no session is active) -->
+            <div class="welcome-screen" id="welcomeScreen">
+                <div class="welcome-content">
+                    <h1>Welcome to Mistral Vibe</h1>
+                    <p>Your AI-powered coding assistant</p>
+                    <button class="start-btn" id="startChatBtn">Start a new chat</button>
+                </div>
+            </div>
+
+            <!-- Chat container (shown when session is active) -->
+            <div class="chat-container hidden" id="chatContainer">
+                <div class="chat-header">
+                    <h2 class="session-name" id="sessionName">New Chat</h2>
+                    <div class="session-stats" id="sessionStats"></div>
+                </div>
+
+                <div class="messages-container" id="messagesContainer">
+                    <div class="messages" id="messages">
+                        <!-- Messages will be populated here -->
+                    </div>
+                </div>
+
+                <div class="input-container">
+                    <div class="input-wrapper">
+                        <textarea
+                            id="messageInput"
+                            placeholder="Ask me anything..."
+                            rows="1"
+                        ></textarea>
+                        <button class="send-btn" id="sendBtn" disabled>
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="input-hint">
+                        Press <kbd>Enter</kbd> to send, <kbd>Shift+Enter</kbd> for new line
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Tool Approval Modal -->
+    <div class="modal hidden" id="approvalModal">
+        <div class="modal-backdrop"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Tool Approval Required</h3>
+            </div>
+            <div class="modal-body">
+                <div class="tool-info">
+                    <span class="tool-name" id="approvalToolName"></span>
+                </div>
+                <pre class="tool-args" id="approvalToolArgs"></pre>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="denyToolBtn">Deny</button>
+                <button class="btn btn-primary" id="approveToolBtn">Approve</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

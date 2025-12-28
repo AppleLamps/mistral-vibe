@@ -1,0 +1,405 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from vibe.core.config import VibeConfig, load_api_keys_from_env
+from vibe.core.modes import AgentMode
+from vibe.core.types import (
+    ApprovalResponse,
+    AssistantEvent,
+    CompactEndEvent,
+    CompactStartEvent,
+    ReasoningEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
+from vibe.web.schemas import (
+    ChatMessage,
+    ConfigResponse,
+    CreateSessionRequest,
+    CreateSessionResponse,
+    ErrorData,
+    SessionDetail,
+    SessionSummary,
+    ToolApprovalResponseData,
+    ToolInfo,
+    WebMessageType,
+    WebSocketMessage,
+)
+from vibe.web.session_manager import WebSession, WebSessionManager
+
+# Global state
+_session_manager: WebSessionManager | None = None
+_api_key: str | None = None
+
+
+def get_session_manager() -> WebSessionManager:
+    """Get the global session manager."""
+    global _session_manager
+    if _session_manager is None:
+        load_api_keys_from_env()
+        config = VibeConfig.load()
+        _session_manager = WebSessionManager(config)
+    return _session_manager
+
+
+def create_app(api_key: str | None = None) -> FastAPI:
+    """Create the FastAPI application."""
+    global _api_key
+    _api_key = api_key
+
+    app = FastAPI(
+        title="Mistral Vibe Web",
+        description="Web interface for Mistral Vibe coding assistant",
+        version="1.0.0",
+    )
+
+    # CORS middleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Static files
+    static_dir = Path(__file__).parent / "static"
+    if static_dir.exists():
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+    # Register routes
+    register_routes(app)
+
+    return app
+
+
+def register_routes(app: FastAPI) -> None:
+    """Register all routes."""
+
+    @app.get("/", response_class=HTMLResponse)
+    async def index() -> FileResponse:
+        """Serve the main HTML page."""
+        static_dir = Path(__file__).parent / "static"
+        return FileResponse(static_dir / "index.html")
+
+    @app.get("/api/sessions", response_model=list[SessionSummary])
+    async def list_sessions() -> list[SessionSummary]:
+        """List all sessions."""
+        manager = get_session_manager()
+        return await manager.list_sessions()
+
+    @app.post("/api/sessions", response_model=CreateSessionResponse)
+    async def create_session(request: CreateSessionRequest) -> CreateSessionResponse:
+        """Create a new session."""
+        manager = get_session_manager()
+        session = await manager.create_session(name=request.name)
+        return CreateSessionResponse(
+            session_id=session.session_id,
+            name=session.name,
+        )
+
+    @app.get("/api/sessions/{session_id}", response_model=SessionDetail)
+    async def get_session(session_id: str) -> SessionDetail:
+        """Get session details."""
+        manager = get_session_manager()
+        session = await manager.get_session(session_id)
+        if not session:
+            session = await manager.load_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return session.to_detail()
+
+    @app.delete("/api/sessions/{session_id}")
+    async def delete_session(session_id: str) -> dict[str, bool]:
+        """Delete a session."""
+        manager = get_session_manager()
+        success = await manager.delete_session(session_id)
+        return {"success": success}
+
+    @app.get("/api/config", response_model=ConfigResponse)
+    async def get_config() -> ConfigResponse:
+        """Get current configuration."""
+        manager = get_session_manager()
+        config = manager.config
+
+        models = []
+        for model in config.models:
+            models.append({
+                "name": model.name,
+                "alias": model.alias,
+                "provider": model.provider,
+            })
+
+        providers = [p.name for p in config.providers]
+
+        tools = []
+        for name, tool_config in config.tools.items():
+            tools.append({
+                "name": name,
+                "permission": tool_config.permission,
+            })
+
+        return ConfigResponse(
+            active_model=config.active_model,
+            models=models,
+            providers=providers,
+            tools=tools,
+        )
+
+    @app.get("/api/tools", response_model=list[ToolInfo])
+    async def list_tools() -> list[ToolInfo]:
+        """List available tools."""
+        manager = get_session_manager()
+
+        # Create a temporary agent to get tool info
+        session = await manager.create_session(name="temp")
+        agent = await session.get_or_create_agent()
+
+        tools = []
+        for tool_class in agent.tool_manager.get_all_tools():
+            permission = "ask"
+            tool_name = tool_class.get_name()
+            if tool_name in manager.config.tools:
+                permission = manager.config.tools[tool_name].permission
+
+            tools.append(ToolInfo(
+                name=tool_name,
+                description=tool_class.description,
+                permission=permission,
+            ))
+
+        # Clean up temp session
+        await manager.delete_session(session.session_id)
+
+        return tools
+
+    @app.websocket("/ws/chat/{session_id}")
+    async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
+        """WebSocket endpoint for real-time chat."""
+        await websocket.accept()
+
+        manager = get_session_manager()
+        session = await manager.get_session(session_id)
+
+        if not session:
+            session = await manager.load_session(session_id)
+
+        if not session:
+            await websocket.send_json({
+                "type": WebMessageType.ERROR,
+                "data": {"message": "Session not found", "code": "SESSION_NOT_FOUND"},
+            })
+            await websocket.close()
+            return
+
+        try:
+            await handle_websocket_session(websocket, session, manager)
+        except WebSocketDisconnect:
+            # Save session on disconnect
+            await manager.save_session(session)
+        except Exception as e:
+            await websocket.send_json({
+                "type": WebMessageType.ERROR,
+                "data": {"message": str(e), "code": "INTERNAL_ERROR"},
+            })
+
+
+async def handle_websocket_session(
+    websocket: WebSocket,
+    session: WebSession,
+    manager: WebSessionManager,
+) -> None:
+    """Handle a WebSocket session."""
+    # Send session info
+    await websocket.send_json({
+        "type": WebMessageType.SESSION_INFO,
+        "data": session.to_detail().model_dump(mode="json"),
+    })
+
+    pending_approval: dict[str, asyncio.Event] = {}
+
+    while True:
+        try:
+            raw_message = await websocket.receive_text()
+            message = json.loads(raw_message)
+            msg_type = message.get("type", "")
+            data = message.get("data", {})
+
+            if msg_type == WebMessageType.USER_MESSAGE:
+                await handle_user_message(
+                    websocket, session, data, pending_approval
+                )
+
+            elif msg_type == WebMessageType.TOOL_APPROVAL_RESPONSE:
+                approval_data = ToolApprovalResponseData(**data)
+                session.respond_to_approval(
+                    approval_data.approved,
+                    approval_data.always_allow,
+                )
+
+        except json.JSONDecodeError:
+            await websocket.send_json({
+                "type": WebMessageType.ERROR,
+                "data": {"message": "Invalid JSON", "code": "INVALID_JSON"},
+            })
+        except WebSocketDisconnect:
+            raise
+        except Exception as e:
+            await websocket.send_json({
+                "type": WebMessageType.ERROR,
+                "data": {"message": str(e), "code": "MESSAGE_ERROR"},
+            })
+
+
+async def handle_user_message(
+    websocket: WebSocket,
+    session: WebSession,
+    data: dict[str, Any],
+    pending_approval: dict[str, asyncio.Event],
+) -> None:
+    """Handle a user message and stream the response."""
+    content = data.get("content", "")
+    if not content:
+        return
+
+    # Add user message to session
+    user_msg = ChatMessage(
+        role="user",
+        content=content,
+        timestamp=datetime.now(),
+    )
+    session.add_chat_message(user_msg)
+
+    # Get or create agent
+    agent = await session.get_or_create_agent()
+
+    # Set up approval callback
+    async def approval_callback(
+        tool_name: str,
+        args: BaseModel,
+        tool_call_id: str,
+    ) -> tuple[ApprovalResponse, str | None]:
+        # Send approval request
+        await websocket.send_json({
+            "type": WebMessageType.TOOL_APPROVAL_REQUEST,
+            "data": {
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "arguments": args.model_dump(mode="json"),
+            },
+        })
+
+        # Wait for response
+        approved, always_allow = await session.request_tool_approval(tool_call_id)
+
+        if always_allow:
+            return ApprovalResponse.YES, None
+        return ApprovalResponse.YES if approved else ApprovalResponse.NO, None
+
+    agent.approval_callback = approval_callback
+
+    # Track assistant response
+    full_response = ""
+    full_reasoning = ""
+
+    try:
+        async for event in agent.act(content):
+            if isinstance(event, AssistantEvent):
+                full_response += event.content
+                await websocket.send_json({
+                    "type": WebMessageType.ASSISTANT_CHUNK,
+                    "data": {
+                        "content": event.content,
+                        "done": event.stopped_by_middleware,
+                    },
+                })
+
+            elif isinstance(event, ReasoningEvent):
+                full_reasoning += event.content
+                await websocket.send_json({
+                    "type": WebMessageType.REASONING,
+                    "data": {"content": event.content},
+                })
+
+            elif isinstance(event, ToolCallEvent):
+                await websocket.send_json({
+                    "type": WebMessageType.TOOL_CALL,
+                    "data": {
+                        "id": event.tool_call_id,
+                        "name": event.tool_name,
+                        "arguments": event.args.model_dump(mode="json"),
+                        "requires_approval": True,
+                    },
+                })
+
+            elif isinstance(event, ToolResultEvent):
+                result_data: dict[str, Any] = {
+                    "tool_call_id": event.tool_call_id,
+                    "name": event.tool_name,
+                    "skipped": event.skipped,
+                }
+                if event.result:
+                    result_data["result"] = str(event.result)
+                if event.error:
+                    result_data["error"] = event.error
+                if event.duration:
+                    result_data["duration"] = event.duration
+
+                await websocket.send_json({
+                    "type": WebMessageType.TOOL_RESULT,
+                    "data": result_data,
+                })
+
+            elif isinstance(event, CompactStartEvent):
+                await websocket.send_json({
+                    "type": WebMessageType.COMPACT_START,
+                    "data": {
+                        "current_tokens": event.current_context_tokens,
+                        "threshold": event.threshold,
+                    },
+                })
+
+            elif isinstance(event, CompactEndEvent):
+                await websocket.send_json({
+                    "type": WebMessageType.COMPACT_END,
+                    "data": {
+                        "old_tokens": event.old_context_tokens,
+                        "new_tokens": event.new_context_tokens,
+                    },
+                })
+
+        # Send done message
+        await websocket.send_json({
+            "type": WebMessageType.ASSISTANT_DONE,
+            "data": {
+                "content": full_response,
+                "stats": agent.stats.model_dump(),
+            },
+        })
+
+        # Add assistant message to session
+        if full_response:
+            assistant_msg = ChatMessage(
+                role="assistant",
+                content=full_response,
+                timestamp=datetime.now(),
+                reasoning=full_reasoning if full_reasoning else None,
+            )
+            session.add_chat_message(assistant_msg)
+
+    except Exception as e:
+        await websocket.send_json({
+            "type": WebMessageType.ERROR,
+            "data": {"message": str(e), "code": "AGENT_ERROR"},
+        })
