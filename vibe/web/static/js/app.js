@@ -26,10 +26,14 @@ const state = {
     isStreaming: false,
     pendingApproval: null,
     config: null,
+    theme: 'light',
+    searchEnabled: false,
+    attachedFiles: [],
 };
 
 // DOM elements
 const elements = {
+    // Core elements
     sessionsList: document.getElementById('sessionsList'),
     messagesContainer: document.getElementById('messagesContainer'),
     messages: document.getElementById('messages'),
@@ -41,25 +45,107 @@ const elements = {
     chatContainer: document.getElementById('chatContainer'),
     sessionName: document.getElementById('sessionName'),
     sessionStats: document.getElementById('sessionStats'),
-    modelInfo: document.getElementById('modelInfo'),
+    streamingStatus: document.getElementById('streamingStatus'),
+
+    // Modals
     approvalModal: document.getElementById('approvalModal'),
     approvalToolName: document.getElementById('approvalToolName'),
     approvalToolArgs: document.getElementById('approvalToolArgs'),
     approveToolBtn: document.getElementById('approveToolBtn'),
     denyToolBtn: document.getElementById('denyToolBtn'),
+    approvalClose: document.getElementById('approvalClose'),
+    alwaysAllowCheck: document.getElementById('alwaysAllowCheck'),
+    imageModal: document.getElementById('imageModal'),
+    imageModalImg: document.getElementById('imageModalImg'),
+    imageModalClose: document.getElementById('imageModalClose'),
+
+    // Theme
+    themeToggle: document.getElementById('themeToggle'),
+    themeToggleMobile: document.getElementById('themeToggleMobile'),
+
+    // Mobile
+    menuToggle: document.getElementById('menuToggle'),
+    sidebar: document.getElementById('sidebar'),
+    sidebarOverlay: document.getElementById('sidebarOverlay'),
+
+    // Model selector
+    modelSelect: document.getElementById('modelSelect'),
+
+    // Session search
+    sessionSearch: document.getElementById('sessionSearch'),
+
+    // Rename
+    renameBtn: document.getElementById('renameBtn'),
+
+    // File upload
+    fileInput: document.getElementById('fileInput'),
+    attachBtn: document.getElementById('attachBtn'),
+    inputWrapper: document.getElementById('inputWrapper'),
+    filePreviewContainer: document.getElementById('filePreviewContainer'),
+    filePreviewList: document.getElementById('filePreviewList'),
+
+    // Search
+    searchToggle: document.getElementById('searchToggle'),
+    searchIndicator: document.getElementById('searchIndicator'),
+    searchClose: document.getElementById('searchClose'),
 };
 
-// Initialize marked for markdown rendering
+// Initialize marked for markdown rendering with code copy buttons
+const renderer = new marked.Renderer();
+const originalCodeRenderer = renderer.code.bind(renderer);
+
+renderer.code = function(code, language) {
+    const highlighted = language && hljs.getLanguage(language)
+        ? hljs.highlight(code, { language }).value
+        : hljs.highlightAuto(code).value;
+
+    const langLabel = language || 'code';
+    return `
+        <div class="code-block-wrapper">
+            <button class="code-copy-btn" onclick="copyCode(this)" data-code="${escapeHtml(code)}">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                Copy
+            </button>
+            <pre><code class="hljs language-${langLabel}">${highlighted}</code></pre>
+        </div>
+    `;
+};
+
 marked.setOptions({
-    highlight: function(code, lang) {
-        if (lang && hljs.getLanguage(lang)) {
-            return hljs.highlight(code, { language: lang }).value;
-        }
-        return hljs.highlightAuto(code).value;
-    },
+    renderer: renderer,
     breaks: true,
     gfm: true,
 });
+
+// Copy code function (global)
+window.copyCode = async function(btn) {
+    const code = btn.dataset.code;
+    try {
+        await navigator.clipboard.writeText(code);
+        btn.classList.add('copied');
+        btn.innerHTML = `
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            Copied!
+        `;
+        setTimeout(() => {
+            btn.classList.remove('copied');
+            btn.innerHTML = `
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                Copy
+            `;
+        }, 2000);
+    } catch (err) {
+        console.error('Failed to copy:', err);
+    }
+};
 
 // API functions
 async function fetchAPI(endpoint, options = {}) {
@@ -88,7 +174,7 @@ async function loadSessions() {
 async function loadConfig() {
     try {
         state.config = await fetchAPI('/config');
-        updateModelInfo();
+        updateModelSelector();
     } catch (error) {
         console.error('Failed to load config:', error);
     }
@@ -102,6 +188,7 @@ async function createSession(name = null) {
         });
         await loadSessions();
         await selectSession(response.session_id);
+        closeSidebar();
     } catch (error) {
         console.error('Failed to create session:', error);
     }
@@ -120,6 +207,7 @@ async function selectSession(sessionId) {
     elements.welcomeScreen.classList.add('hidden');
     elements.chatContainer.classList.remove('hidden');
     elements.messages.innerHTML = '';
+    clearAttachedFiles();
 
     // Update active session in sidebar
     document.querySelectorAll('.session-item').forEach(item => {
@@ -227,6 +315,7 @@ function handleSessionInfo(data) {
 function handleAssistantChunk(data) {
     state.isStreaming = true;
     updateSendButton();
+    showStreamingStatus(true);
 
     let streamingMessage = document.querySelector('.message.assistant.streaming');
 
@@ -248,16 +337,11 @@ function handleAssistantChunk(data) {
 function handleAssistantDone(data) {
     state.isStreaming = false;
     updateSendButton();
+    showStreamingStatus(false);
 
     const streamingMessage = document.querySelector('.message.assistant.streaming');
     if (streamingMessage) {
         streamingMessage.classList.remove('streaming');
-
-        // Remove streaming indicator if present
-        const indicator = streamingMessage.querySelector('.streaming-indicator');
-        if (indicator) {
-            indicator.remove();
-        }
     }
 
     if (data.stats) {
@@ -273,7 +357,11 @@ function handleToolCall(data) {
     toolCallEl.dataset.toolCallId = data.id;
     toolCallEl.innerHTML = `
         <div class="tool-call-header">
-            <span class="tool-call-icon">&#9881;</span>
+            <span class="tool-call-icon">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+                </svg>
+            </span>
             <span>${escapeHtml(data.name)}</span>
         </div>
         <div class="tool-call-body">
@@ -317,7 +405,10 @@ function handleToolResult(data) {
         }
 
         if (data.duration) {
-            resultEl.textContent += ` (${data.duration.toFixed(2)}s)`;
+            const durationSpan = document.createElement('span');
+            durationSpan.style.opacity = '0.7';
+            durationSpan.textContent = ` (${data.duration.toFixed(2)}s)`;
+            resultEl.appendChild(durationSpan);
         }
 
         toolCallEl.querySelector('.tool-call-body').appendChild(resultEl);
@@ -331,6 +422,7 @@ function handleToolApprovalRequest(data) {
 
     elements.approvalToolName.textContent = data.tool_name;
     elements.approvalToolArgs.textContent = JSON.stringify(data.arguments, null, 2);
+    elements.alwaysAllowCheck.checked = false;
     elements.approvalModal.classList.remove('hidden');
 }
 
@@ -342,12 +434,17 @@ function handleReasoning(data) {
 function handleError(data) {
     state.isStreaming = false;
     updateSendButton();
+    showStreamingStatus(false);
 
     const errorEl = document.createElement('div');
     errorEl.className = 'message error';
     errorEl.innerHTML = `
+        <div class="message-header">
+            <div class="message-avatar" style="background: var(--error);">!</div>
+            <span class="message-role">Error</span>
+        </div>
         <div class="message-content" style="color: var(--error);">
-            Error: ${escapeHtml(data.message)}
+            ${escapeHtml(data.message)}
         </div>
     `;
     elements.messages.appendChild(errorEl);
@@ -379,7 +476,10 @@ function renderSessions() {
             </div>
         `;
 
-        item.addEventListener('click', () => selectSession(session.id));
+        item.addEventListener('click', () => {
+            selectSession(session.id);
+            closeSidebar();
+        });
         elements.sessionsList.appendChild(item);
     });
 }
@@ -417,27 +517,43 @@ function appendAssistantMessage(content) {
     elements.messages.appendChild(messageEl);
 }
 
-function updateModelInfo() {
-    if (state.config) {
-        const modelName = elements.modelInfo.querySelector('.model-name');
-        modelName.textContent = state.config.active_model;
+function updateModelSelector() {
+    if (state.config && elements.modelSelect) {
+        elements.modelSelect.innerHTML = '';
+        state.config.models.forEach(model => {
+            const option = document.createElement('option');
+            option.value = model.alias;
+            option.textContent = model.alias;
+            if (model.alias === state.config.active_model) {
+                option.selected = true;
+            }
+            elements.modelSelect.appendChild(option);
+        });
     }
 }
 
 function updateSessionStats(stats) {
-    if (stats) {
+    if (stats && elements.sessionStats) {
         const tokens = stats.session_total_llm_tokens || 0;
         const cost = stats.session_cost || 0;
-        elements.sessionStats.textContent = `${tokens} tokens | $${cost.toFixed(4)}`;
+        elements.sessionStats.textContent = `${tokens.toLocaleString()} tokens | $${cost.toFixed(4)}`;
     }
 }
 
 function updateSendButton() {
-    const hasContent = elements.messageInput.value.trim().length > 0;
+    const hasContent = elements.messageInput.value.trim().length > 0 || state.attachedFiles.length > 0;
     const isConnected = state.ws && state.ws.readyState === WebSocket.OPEN;
     const canSend = hasContent && isConnected && !state.isStreaming;
 
     elements.sendBtn.disabled = !canSend;
+}
+
+function showStreamingStatus(show) {
+    if (show) {
+        elements.streamingStatus.classList.remove('hidden');
+    } else {
+        elements.streamingStatus.classList.add('hidden');
+    }
 }
 
 function scrollToBottom() {
@@ -446,7 +562,7 @@ function scrollToBottom() {
 
 function sendMessage() {
     const content = elements.messageInput.value.trim();
-    if (!content || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    if ((!content && state.attachedFiles.length === 0) || !state.ws || state.ws.readyState !== WebSocket.OPEN) {
         return;
     }
 
@@ -454,14 +570,31 @@ function sendMessage() {
     appendUserMessage(content);
     scrollToBottom();
 
+    // Build message with attachments
+    const messageData = {
+        content,
+        search_enabled: state.searchEnabled,
+    };
+
+    // Add file info if any
+    if (state.attachedFiles.length > 0) {
+        messageData.attachments = state.attachedFiles.map(f => ({
+            name: f.name,
+            type: f.type,
+            size: f.size,
+            data: f.data, // base64
+        }));
+    }
+
     // Send via WebSocket
     state.ws.send(JSON.stringify({
         type: MessageType.USER_MESSAGE,
-        data: { content },
+        data: messageData,
     }));
 
-    // Clear input
+    // Clear input and files
     elements.messageInput.value = '';
+    clearAttachedFiles();
     updateSendButton();
     autoResizeTextarea();
 }
@@ -471,12 +604,14 @@ function respondToApproval(approved) {
         return;
     }
 
+    const alwaysAllow = elements.alwaysAllowCheck.checked;
+
     state.ws.send(JSON.stringify({
         type: MessageType.TOOL_APPROVAL_RESPONSE,
         data: {
             tool_call_id: state.pendingApproval.tool_call_id,
             approved,
-            always_allow: false,
+            always_allow: alwaysAllow,
         },
     }));
 
@@ -488,6 +623,209 @@ function autoResizeTextarea() {
     const textarea = elements.messageInput;
     textarea.style.height = 'auto';
     textarea.style.height = Math.min(textarea.scrollHeight, 150) + 'px';
+}
+
+// Theme functions
+function initTheme() {
+    const savedTheme = localStorage.getItem('vibe-theme') || 'light';
+    setTheme(savedTheme);
+}
+
+function setTheme(theme) {
+    state.theme = theme;
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('vibe-theme', theme);
+
+    // Toggle highlight.js themes
+    const lightTheme = document.getElementById('hljs-light');
+    const darkTheme = document.getElementById('hljs-dark');
+    if (lightTheme && darkTheme) {
+        lightTheme.disabled = theme === 'dark';
+        darkTheme.disabled = theme === 'light';
+    }
+}
+
+function toggleTheme() {
+    const newTheme = state.theme === 'light' ? 'dark' : 'light';
+    setTheme(newTheme);
+}
+
+// Mobile sidebar functions
+function openSidebar() {
+    elements.sidebar.classList.add('open');
+    elements.sidebarOverlay.classList.add('visible');
+}
+
+function closeSidebar() {
+    elements.sidebar.classList.remove('open');
+    elements.sidebarOverlay.classList.remove('visible');
+}
+
+// Session search
+function filterSessions(query) {
+    const items = elements.sessionsList.querySelectorAll('.session-item');
+    const lowerQuery = query.toLowerCase();
+
+    items.forEach(item => {
+        const name = item.querySelector('.session-item-name').textContent.toLowerCase();
+        const preview = item.querySelector('.session-item-preview')?.textContent.toLowerCase() || '';
+
+        if (name.includes(lowerQuery) || preview.includes(lowerQuery)) {
+            item.classList.remove('hidden');
+        } else {
+            item.classList.add('hidden');
+        }
+    });
+}
+
+// Session rename
+function enableRename() {
+    elements.sessionName.contentEditable = 'true';
+    elements.sessionName.focus();
+
+    // Select all text
+    const range = document.createRange();
+    range.selectNodeContents(elements.sessionName);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+}
+
+function finishRename() {
+    elements.sessionName.contentEditable = 'false';
+    const newName = elements.sessionName.textContent.trim();
+
+    if (newName && state.currentSessionId) {
+        // Could send rename request to server
+        console.log('Rename session to:', newName);
+    }
+}
+
+// File handling
+function handleFileSelect(files) {
+    for (const file of files) {
+        if (file.size > 10 * 1024 * 1024) {
+            alert(`File ${file.name} is too large (max 10MB)`);
+            continue;
+        }
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const fileData = {
+                name: file.name,
+                type: file.type,
+                size: file.size,
+                data: e.target.result.split(',')[1], // base64 without prefix
+            };
+
+            // For images, also store the data URL for preview
+            if (file.type.startsWith('image/')) {
+                fileData.preview = e.target.result;
+            }
+
+            state.attachedFiles.push(fileData);
+            renderFilePreview();
+            updateSendButton();
+        };
+        reader.readAsDataURL(file);
+    }
+}
+
+function renderFilePreview() {
+    elements.filePreviewList.innerHTML = '';
+
+    if (state.attachedFiles.length === 0) {
+        elements.filePreviewContainer.classList.add('hidden');
+        return;
+    }
+
+    elements.filePreviewContainer.classList.remove('hidden');
+
+    state.attachedFiles.forEach((file, index) => {
+        const item = document.createElement('div');
+        item.className = 'file-preview-item';
+
+        let preview;
+        if (file.preview) {
+            preview = `<img src="${file.preview}" alt="${escapeHtml(file.name)}" />`;
+        } else {
+            preview = `
+                <div class="file-icon">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                    </svg>
+                </div>
+            `;
+        }
+
+        item.innerHTML = `
+            ${preview}
+            <span class="file-preview-name">${escapeHtml(file.name)}</span>
+            <button class="file-preview-remove" data-index="${index}">&times;</button>
+        `;
+
+        item.querySelector('.file-preview-remove').addEventListener('click', (e) => {
+            e.stopPropagation();
+            removeFile(index);
+        });
+
+        elements.filePreviewList.appendChild(item);
+    });
+}
+
+function removeFile(index) {
+    state.attachedFiles.splice(index, 1);
+    renderFilePreview();
+    updateSendButton();
+}
+
+function clearAttachedFiles() {
+    state.attachedFiles = [];
+    renderFilePreview();
+}
+
+// Drag and drop
+function setupDragAndDrop() {
+    const wrapper = elements.inputWrapper;
+
+    wrapper.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        wrapper.classList.add('drag-over');
+    });
+
+    wrapper.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        wrapper.classList.remove('drag-over');
+    });
+
+    wrapper.addEventListener('drop', (e) => {
+        e.preventDefault();
+        wrapper.classList.remove('drag-over');
+
+        const files = e.dataTransfer.files;
+        if (files.length > 0) {
+            handleFileSelect(files);
+        }
+    });
+}
+
+// Web search toggle
+function toggleSearch() {
+    state.searchEnabled = !state.searchEnabled;
+    elements.searchToggle.classList.toggle('active', state.searchEnabled);
+    elements.searchIndicator.classList.toggle('hidden', !state.searchEnabled);
+}
+
+// Image modal
+function showImageModal(src) {
+    elements.imageModalImg.src = src;
+    elements.imageModal.classList.remove('hidden');
+}
+
+function hideImageModal() {
+    elements.imageModal.classList.add('hidden');
+    elements.imageModalImg.src = '';
 }
 
 // Utility functions
@@ -519,33 +857,94 @@ function formatRelativeTime(date) {
 }
 
 // Event listeners
-elements.messageInput.addEventListener('input', () => {
-    updateSendButton();
-    autoResizeTextarea();
-});
+function setupEventListeners() {
+    // Message input
+    elements.messageInput.addEventListener('input', () => {
+        updateSendButton();
+        autoResizeTextarea();
+    });
 
-elements.messageInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendMessage();
-    }
-});
+    elements.messageInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
 
-elements.sendBtn.addEventListener('click', sendMessage);
+    elements.sendBtn.addEventListener('click', sendMessage);
 
-elements.newSessionBtn.addEventListener('click', () => createSession());
-elements.startChatBtn.addEventListener('click', () => createSession());
+    // New session
+    elements.newSessionBtn.addEventListener('click', () => createSession());
+    elements.startChatBtn.addEventListener('click', () => createSession());
 
-elements.approveToolBtn.addEventListener('click', () => respondToApproval(true));
-elements.denyToolBtn.addEventListener('click', () => respondToApproval(false));
+    // Tool approval
+    elements.approveToolBtn.addEventListener('click', () => respondToApproval(true));
+    elements.denyToolBtn.addEventListener('click', () => respondToApproval(false));
+    elements.approvalClose.addEventListener('click', () => respondToApproval(false));
+    elements.approvalModal.querySelector('.modal-backdrop').addEventListener('click', () => {
+        respondToApproval(false);
+    });
 
-// Close modal on backdrop click
-elements.approvalModal.querySelector('.modal-backdrop').addEventListener('click', () => {
-    respondToApproval(false);
-});
+    // Theme toggle
+    elements.themeToggle?.addEventListener('click', toggleTheme);
+    elements.themeToggleMobile?.addEventListener('click', toggleTheme);
+
+    // Mobile sidebar
+    elements.menuToggle?.addEventListener('click', openSidebar);
+    elements.sidebarOverlay?.addEventListener('click', closeSidebar);
+
+    // Session search
+    elements.sessionSearch?.addEventListener('input', (e) => {
+        filterSessions(e.target.value);
+    });
+
+    // Session rename
+    elements.renameBtn?.addEventListener('click', enableRename);
+    elements.sessionName?.addEventListener('blur', finishRename);
+    elements.sessionName?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            finishRename();
+        }
+        if (e.key === 'Escape') {
+            elements.sessionName.contentEditable = 'false';
+        }
+    });
+
+    // File upload
+    elements.attachBtn?.addEventListener('click', () => {
+        elements.fileInput.click();
+    });
+
+    elements.fileInput?.addEventListener('change', (e) => {
+        handleFileSelect(e.target.files);
+        e.target.value = ''; // Reset for same file selection
+    });
+
+    // Search toggle
+    elements.searchToggle?.addEventListener('click', toggleSearch);
+    elements.searchClose?.addEventListener('click', toggleSearch);
+
+    // Image modal
+    elements.imageModalClose?.addEventListener('click', hideImageModal);
+    elements.imageModal?.querySelector('.modal-backdrop')?.addEventListener('click', hideImageModal);
+
+    // Click on images in messages
+    elements.messages.addEventListener('click', (e) => {
+        if (e.target.tagName === 'IMG' && e.target.closest('.message-content')) {
+            showImageModal(e.target.src);
+        }
+    });
+
+    // Drag and drop
+    setupDragAndDrop();
+}
 
 // Initialize
 async function init() {
+    initTheme();
+    setupEventListeners();
+
     await Promise.all([
         loadSessions(),
         loadConfig(),
