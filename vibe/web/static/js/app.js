@@ -58,6 +58,12 @@ const elements = {
     imageModal: document.getElementById('imageModal'),
     imageModalImg: document.getElementById('imageModalImg'),
     imageModalClose: document.getElementById('imageModalClose'),
+    deleteModal: document.getElementById('deleteModal'),
+    deleteModalClose: document.getElementById('deleteModalClose'),
+    confirmDeleteBtn: document.getElementById('confirmDeleteBtn'),
+    cancelDeleteBtn: document.getElementById('cancelDeleteBtn'),
+    deleteSessionBtn: document.getElementById('deleteSessionBtn'),
+    toastContainer: document.getElementById('toastContainer'),
 
     // Theme
     themeToggle: document.getElementById('themeToggle'),
@@ -147,6 +153,42 @@ window.copyCode = async function(btn) {
     }
 };
 
+// Safe HTML sanitization function
+function sanitizeHTML(html) {
+    if (typeof DOMPurify !== 'undefined') {
+        return DOMPurify.sanitize(html, { ADD_ATTR: ['onclick'] });
+    }
+    // Fallback if DOMPurify not loaded
+    return html;
+}
+
+// Toast notification system
+function showToast(message, type = 'info', duration = 4000) {
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.innerHTML = `
+        <span class="toast-message">${sanitizeHTML(message)}</span>
+        <button class="toast-close" onclick="this.parentElement.remove()">&times;</button>
+    `;
+    elements.toastContainer?.appendChild(toast);
+
+    // Auto-remove after duration
+    setTimeout(() => {
+        toast.style.animation = 'slideOut 0.3s ease forwards';
+        setTimeout(() => toast.remove(), 300);
+    }, duration);
+
+    return toast;
+}
+
+// Convenience toast functions
+const toast = {
+    success: (msg) => showToast(msg, 'success'),
+    error: (msg) => showToast(msg, 'error'),
+    warning: (msg) => showToast(msg, 'warning'),
+    info: (msg) => showToast(msg, 'info'),
+};
+
 // API functions
 async function fetchAPI(endpoint, options = {}) {
     const response = await fetch(`/api${endpoint}`, {
@@ -218,6 +260,11 @@ async function selectSession(sessionId) {
     connectWebSocket(sessionId);
 }
 
+// WebSocket reconnection state
+let wsReconnectAttempts = 0;
+const WS_MAX_RECONNECT_ATTEMPTS = 5;
+const WS_RECONNECT_DELAY = 2000;
+
 function connectWebSocket(sessionId) {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws/chat/${sessionId}`;
@@ -226,6 +273,7 @@ function connectWebSocket(sessionId) {
 
     state.ws.onopen = () => {
         console.log('WebSocket connected');
+        wsReconnectAttempts = 0; // Reset on successful connection
         updateSendButton();
     };
 
@@ -238,13 +286,28 @@ function connectWebSocket(sessionId) {
         }
     };
 
-    state.ws.onclose = () => {
-        console.log('WebSocket disconnected');
+    state.ws.onclose = (event) => {
+        console.log('WebSocket disconnected', event.code, event.reason);
         updateSendButton();
+
+        // Attempt reconnection if not intentionally closed
+        if (state.currentSessionId === sessionId && wsReconnectAttempts < WS_MAX_RECONNECT_ATTEMPTS) {
+            wsReconnectAttempts++;
+            const delay = WS_RECONNECT_DELAY * wsReconnectAttempts;
+            toast.warning(`Connection lost. Reconnecting in ${delay/1000}s...`);
+            setTimeout(() => {
+                if (state.currentSessionId === sessionId) {
+                    connectWebSocket(sessionId);
+                }
+            }, delay);
+        } else if (wsReconnectAttempts >= WS_MAX_RECONNECT_ATTEMPTS) {
+            toast.error('Connection lost. Please refresh the page.');
+        }
     };
 
     state.ws.onerror = (error) => {
         console.error('WebSocket error:', error);
+        toast.error('Connection error');
     };
 }
 
@@ -329,7 +392,7 @@ function handleAssistantChunk(data) {
     const currentContent = contentEl.dataset.rawContent || '';
     const newContent = currentContent + data.content;
     contentEl.dataset.rawContent = newContent;
-    contentEl.innerHTML = marked.parse(newContent);
+    contentEl.innerHTML = sanitizeHTML(marked.parse(newContent));
 
     scrollToBottom();
 }
@@ -513,7 +576,7 @@ function createAssistantMessage() {
 function appendAssistantMessage(content) {
     const messageEl = createAssistantMessage();
     const contentEl = messageEl.querySelector('.message-content');
-    contentEl.innerHTML = marked.parse(content);
+    contentEl.innerHTML = sanitizeHTML(marked.parse(content));
     elements.messages.appendChild(messageEl);
 }
 
@@ -711,10 +774,60 @@ async function finishRename() {
                 if (item) {
                     item.querySelector('.session-item-name').textContent = newName;
                 }
+                toast.success('Session renamed');
+            } else {
+                toast.error('Failed to rename session');
             }
         } catch (error) {
             console.error('Failed to rename session:', error);
+            toast.error('Failed to rename session');
         }
+    }
+}
+
+// Delete session functionality
+function showDeleteModal() {
+    elements.deleteModal?.classList.remove('hidden');
+}
+
+function hideDeleteModal() {
+    elements.deleteModal?.classList.add('hidden');
+}
+
+async function deleteCurrentSession() {
+    if (!state.currentSessionId) return;
+
+    try {
+        const response = await fetch(`/api/sessions/${state.currentSessionId}`, {
+            method: 'DELETE',
+        });
+
+        if (response.ok) {
+            hideDeleteModal();
+            toast.success('Session deleted');
+
+            // Remove from sidebar
+            const item = document.querySelector(
+                `.session-item[data-session-id="${state.currentSessionId}"]`
+            );
+            if (item) item.remove();
+
+            // Close WebSocket and reset state
+            if (state.ws) {
+                state.ws.close();
+                state.ws = null;
+            }
+            state.currentSessionId = null;
+
+            // Show welcome screen
+            elements.welcomeScreen?.classList.remove('hidden');
+            elements.chatContainer?.classList.add('hidden');
+        } else {
+            toast.error('Failed to delete session');
+        }
+    } catch (error) {
+        console.error('Failed to delete session:', error);
+        toast.error('Failed to delete session');
     }
 }
 
@@ -731,9 +844,13 @@ async function changeModel(modelName) {
             if (state.config) {
                 state.config.active_model = data.model;
             }
+            toast.success(`Model changed to ${modelName}`);
+        } else {
+            toast.error('Failed to change model');
         }
     } catch (error) {
         console.error('Failed to change model:', error);
+        toast.error('Failed to change model');
     }
 }
 
@@ -946,6 +1063,13 @@ function setupEventListeners() {
             elements.sessionName.contentEditable = 'false';
         }
     });
+
+    // Session delete
+    elements.deleteSessionBtn?.addEventListener('click', showDeleteModal);
+    elements.deleteModalClose?.addEventListener('click', hideDeleteModal);
+    elements.cancelDeleteBtn?.addEventListener('click', hideDeleteModal);
+    elements.confirmDeleteBtn?.addEventListener('click', deleteCurrentSession);
+    elements.deleteModal?.querySelector('.modal-backdrop')?.addEventListener('click', hideDeleteModal);
 
     // File upload
     elements.attachBtn?.addEventListener('click', () => {
