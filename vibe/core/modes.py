@@ -92,17 +92,24 @@ MODE_CONFIGS: dict[AgentMode, ModeConfig] = {
     ),
 }
 
+# Cached tuple for mode ordering - avoids creating new list on every call
+_MODE_ORDER: tuple[AgentMode, ...] = (
+    AgentMode.DEFAULT,
+    AgentMode.PLAN,
+    AgentMode.ACCEPT_EDITS,
+    AgentMode.AUTO_APPROVE,
+)
+
+# O(1) index lookup for mode transitions
+_MODE_INDEX: dict[AgentMode, int] = {mode: idx for idx, mode in enumerate(_MODE_ORDER)}
+
 
 def get_mode_order() -> list[AgentMode]:
-    return [
-        AgentMode.DEFAULT,
-        AgentMode.PLAN,
-        AgentMode.ACCEPT_EDITS,
-        AgentMode.AUTO_APPROVE,
-    ]
+    """Returns the mode order. Note: Returns a list for backward compatibility."""
+    return list(_MODE_ORDER)
 
 
 def next_mode(current: AgentMode) -> AgentMode:
-    order = get_mode_order()
-    idx = order.index(current)
-    return order[(idx + 1) % len(order)]
+    """Get the next mode in the cycle using cached constants for performance."""
+    idx = _MODE_INDEX[current]
+    return _MODE_ORDER[(idx + 1) % len(_MODE_ORDER)]

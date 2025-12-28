@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections import defaultdict
+from collections import defaultdict, deque
 from enum import StrEnum, auto
 from pathlib import Path
 from typing import ClassVar, final
@@ -267,10 +267,10 @@ class DependencyAnalyzer(
 
         graph: dict[str, list[str]] = defaultdict(list)
         visited: set[str] = set()
-        queue: list[tuple[Path, int]] = [(start_path, 0)]
+        queue: deque[tuple[Path, int]] = deque([(start_path, 0)])
 
         while queue:
-            current_path, current_depth = queue.pop(0)
+            current_path, current_depth = queue.popleft()
 
             if current_depth > depth:
                 continue
@@ -319,6 +319,16 @@ class DependencyAnalyzer(
     def _collect_files(self, root: Path) -> list[Path]:
         """Collect all supported files under a directory."""
         import fnmatch
+        import re
+
+        # Precompile exclude patterns for efficiency
+        compiled_patterns = [
+            re.compile(fnmatch.translate(pat))
+            for pat in self.config.exclude_patterns
+        ]
+
+        def is_excluded(path_str: str) -> bool:
+            return any(p.match(path_str) for p in compiled_patterns)
 
         files = []
 
@@ -327,10 +337,7 @@ class DependencyAnalyzer(
             dirnames[:] = [
                 d
                 for d in dirnames
-                if not any(
-                    fnmatch.fnmatch(os.path.join(dirpath, d), pat)
-                    for pat in self.config.exclude_patterns
-                )
+                if not is_excluded(os.path.join(dirpath, d))
             ]
 
             for filename in filenames:
@@ -339,11 +346,7 @@ class DependencyAnalyzer(
                 if not is_supported_file(file_path):
                     continue
 
-                full_path = str(file_path)
-                if any(
-                    fnmatch.fnmatch(full_path, pat)
-                    for pat in self.config.exclude_patterns
-                ):
+                if is_excluded(str(file_path)):
                     continue
 
                 files.append(file_path)
