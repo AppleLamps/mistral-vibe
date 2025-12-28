@@ -967,6 +967,7 @@ function setupDragAndDrop() {
 function toggleSearch() {
     state.searchEnabled = !state.searchEnabled;
     elements.searchToggle.classList.toggle('active', state.searchEnabled);
+    elements.searchToggle.setAttribute('aria-pressed', state.searchEnabled);
     elements.searchIndicator.classList.toggle('hidden', !state.searchEnabled);
 }
 

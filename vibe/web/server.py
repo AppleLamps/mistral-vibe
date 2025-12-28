@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -48,6 +50,35 @@ _session_manager: WebSessionManager | None = None
 _api_key: str | None = None
 
 
+# Simple in-memory rate limiter
+class RateLimiter:
+    """Simple in-memory rate limiter using token bucket algorithm."""
+
+    def __init__(self, requests_per_minute: int = 60) -> None:
+        self.requests_per_minute = requests_per_minute
+        self.requests: dict[str, list[float]] = defaultdict(list)
+
+    def is_allowed(self, client_ip: str) -> bool:
+        """Check if request is allowed for the given client."""
+        now = time.time()
+        minute_ago = now - 60
+
+        # Clean old requests
+        self.requests[client_ip] = [
+            t for t in self.requests[client_ip] if t > minute_ago
+        ]
+
+        # Check limit
+        if len(self.requests[client_ip]) >= self.requests_per_minute:
+            return False
+
+        self.requests[client_ip].append(now)
+        return True
+
+
+_rate_limiter = RateLimiter(requests_per_minute=120)
+
+
 def get_session_manager() -> WebSessionManager:
     """Get the global session manager."""
     global _session_manager
@@ -77,6 +108,21 @@ def create_app(api_key: str | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Rate limiting middleware
+    @app.middleware("http")
+    async def rate_limit_middleware(request: Request, call_next: Any) -> Any:
+        # Skip rate limiting for static files
+        if request.url.path.startswith("/static"):
+            return await call_next(request)
+
+        client_ip = request.client.host if request.client else "unknown"
+        if not _rate_limiter.is_allowed(client_ip):
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Too many requests. Please slow down."},
+            )
+        return await call_next(request)
 
     # Static files
     static_dir = Path(__file__).parent / "static"
@@ -396,9 +442,20 @@ async def handle_user_message(
         # Wait for response
         approved, always_allow = await session.request_tool_approval(tool_call_id)
 
-        if always_allow:
+        if always_allow and approved:
+            # Persist always_allow to config (like CLI does)
+            VibeConfig.save_updates({"tools": {tool_name: {"permission": "always"}}})
+            # Also update in-memory config for this session
+            manager = get_session_manager()
+            if tool_name not in manager.config.tools:
+                from vibe.core.tools.base import BaseToolConfig
+                manager.config.tools[tool_name] = BaseToolConfig()
+            from vibe.core.tools.base import ToolPermission
+            manager.config.tools[tool_name].permission = ToolPermission.ALWAYS
+
+        if approved:
             return ApprovalResponse.YES, None
-        return ApprovalResponse.YES if approved else ApprovalResponse.NO, None
+        return ApprovalResponse.NO, None
 
     agent.approval_callback = approval_callback
 
