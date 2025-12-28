@@ -2,7 +2,7 @@
 name: code-reviewer
 description: |
   Review code changes for quality, patterns, and potential issues. Use after significant code changes or before PRs.
-  Focuses on Python 3.12+ best practices and project conventions.
+  Focuses on Python 3.12+ best practices, project conventions, and web interface security patterns.
 tools: bash, grep, read_file, list_dir
 model: inherit
 ---
@@ -49,6 +49,16 @@ Review code changes for quality, adherence to project patterns, potential bugs, 
 - [ ] Absolute imports only (no relative imports)
 - [ ] Tool classes extend `BaseTool` correctly
 - [ ] Config classes extend appropriate base
+
+### Web Interface Patterns (vibe/web/)
+- [ ] All user input sanitized with DOMPurify before innerHTML
+- [ ] WebSocket messages use WebMessageType enum
+- [ ] Tool approval uses per-tool-call tracking (not per-session)
+- [ ] Toast notifications for user-facing errors
+- [ ] Accessibility: ARIA labels, semantic HTML, focus-visible
+- [ ] Rate limiting on API endpoints
+- [ ] Pydantic schemas for all request/response types
+- [ ] Always-allow permissions persisted via VibeConfig.save_updates()
 
 ## Commands
 
