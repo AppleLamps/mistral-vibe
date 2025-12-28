@@ -87,13 +87,26 @@ class TestACPNewSession:
         assert session_response.models is not None
         assert session_response.models.currentModelId is not None
         assert session_response.models.availableModels is not None
-        assert len(session_response.models.availableModels) == 2
+        # Check that we have models (includes both configured and default models)
+        assert len(session_response.models.availableModels) >= 2
 
         assert session_response.models.currentModelId == "devstral-latest"
-        assert session_response.models.availableModels[0].modelId == "devstral-latest"
-        assert session_response.models.availableModels[0].name == "devstral-latest"
-        assert session_response.models.availableModels[1].modelId == "devstral-small"
-        assert session_response.models.availableModels[1].name == "devstral-small"
+
+        # Check that the configured models are present in the available models
+        model_ids = [model.modelId for model in session_response.models.availableModels]
+        assert "devstral-latest" in model_ids
+        assert "devstral-small" in model_ids
+
+        # Verify the configured models have correct properties
+        devstral_latest = next(
+            m for m in session_response.models.availableModels if m.modelId == "devstral-latest"
+        )
+        assert devstral_latest.name == "devstral-latest"
+
+        devstral_small = next(
+            m for m in session_response.models.availableModels if m.modelId == "devstral-small"
+        )
+        assert devstral_small.name == "devstral-small"
 
         assert session_response.modes is not None
         assert session_response.modes.currentModeId is not None

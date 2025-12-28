@@ -5,6 +5,7 @@ import shutil
 import pytest
 
 from vibe.core.tools.base import ToolError
+from vibe.core.tools.builtins import grep as grep_module
 from vibe.core.tools.builtins.grep import (
     Grep,
     GrepArgs,
@@ -40,6 +41,9 @@ def test_detects_ripgrep_when_available(grep):
 
 
 def test_falls_back_to_gnu_grep(grep, monkeypatch):
+    # Reset the global cache before testing
+    grep_module._cached_backend = None
+
     original_which = shutil.which
 
     def mock_which(cmd):
@@ -54,6 +58,9 @@ def test_falls_back_to_gnu_grep(grep, monkeypatch):
 
 
 def test_raises_error_if_no_grep_available(grep, monkeypatch):
+    # Reset the global cache before testing
+    grep_module._cached_backend = None
+
     monkeypatch.setattr("shutil.which", lambda cmd: None)
 
     with pytest.raises(ToolError) as err:

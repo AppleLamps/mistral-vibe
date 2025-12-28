@@ -541,9 +541,9 @@ class Agent:
             error_msg = f"<{TOOL_ERROR_TAG}>{tool_instance.get_name()} failed: {exc}</{TOOL_ERROR_TAG}>"
             return (False, None, 0.0, error_msg)
 
-        except (asyncio.CancelledError, KeyboardInterrupt):
-            # Re-raise cancellation exceptions
-            raise
+        except (asyncio.CancelledError, KeyboardInterrupt) as exc:
+            # Return cancellation exceptions as results so they can be handled by _emit_tool_result
+            return exc
 
         except Exception as exc:
             error_msg = f"<{TOOL_ERROR_TAG}>{tool_instance.get_name()} failed: {exc}</{TOOL_ERROR_TAG}>"

@@ -51,6 +51,7 @@ async def test_auto_compact_triggers_and_batches_observer() -> None:
     assert roles == [Role.system, Role.user, Role.assistant]
     assert (
         observed[1][1] is not None
-        and "Last request from user was: Hello" in observed[1][1]
+        and "## Last User Request" in observed[1][1]
+        and "Hello" in observed[1][1]
     )
     assert observed[2][1] == "<final>"
