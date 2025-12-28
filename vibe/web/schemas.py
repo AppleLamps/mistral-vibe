@@ -55,12 +55,14 @@ class SessionDetail(BaseModel):
     updated_at: datetime
     messages: list[ChatMessage] = Field(default_factory=list)
     stats: dict[str, Any] = Field(default_factory=dict)
+    mode: str = "default"  # Current agent mode
 
 
 class CreateSessionRequest(BaseModel):
     """Request to create a new session."""
 
     name: str | None = None
+    mode: str = "default"  # "default", "plan", or "auto_approve"
 
 
 class CreateSessionResponse(BaseModel):
