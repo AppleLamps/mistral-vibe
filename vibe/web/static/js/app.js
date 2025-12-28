@@ -691,13 +691,49 @@ function enableRename() {
     sel.addRange(range);
 }
 
-function finishRename() {
+async function finishRename() {
     elements.sessionName.contentEditable = 'false';
     const newName = elements.sessionName.textContent.trim();
 
     if (newName && state.currentSessionId) {
-        // Could send rename request to server
-        console.log('Rename session to:', newName);
+        try {
+            const response = await fetch(`/api/sessions/${state.currentSessionId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: newName }),
+            });
+
+            if (response.ok) {
+                // Update the session in the sidebar
+                const item = document.querySelector(
+                    `.session-item[data-session-id="${state.currentSessionId}"]`
+                );
+                if (item) {
+                    item.querySelector('.session-item-name').textContent = newName;
+                }
+            }
+        } catch (error) {
+            console.error('Failed to rename session:', error);
+        }
+    }
+}
+
+async function changeModel(modelName) {
+    try {
+        const response = await fetch('/api/config/model', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: modelName }),
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            if (state.config) {
+                state.config.active_model = data.model;
+            }
+        }
+    } catch (error) {
+        console.error('Failed to change model:', error);
     }
 }
 
@@ -919,6 +955,11 @@ function setupEventListeners() {
     elements.fileInput?.addEventListener('change', (e) => {
         handleFileSelect(e.target.files);
         e.target.value = ''; // Reset for same file selection
+    });
+
+    // Model selector
+    elements.modelSelect?.addEventListener('change', (e) => {
+        changeModel(e.target.value);
     });
 
     // Search toggle

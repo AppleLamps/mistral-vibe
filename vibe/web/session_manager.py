@@ -36,8 +36,8 @@ class WebSession:
         self.agent: Agent | None = None
         self.messages: list[LLMMessage] = []
         self.chat_messages: list[ChatMessage] = []
-        self._approval_event: asyncio.Event | None = None
-        self._approval_response: tuple[bool, bool] | None = None  # (approved, always)
+        # Pending approvals keyed by tool_call_id: (event, response)
+        self._pending_approvals: dict[str, tuple[asyncio.Event, tuple[bool, bool] | None]] = {}
 
     async def get_or_create_agent(self) -> Agent:
         """Get existing agent or create a new one."""
@@ -63,22 +63,29 @@ class WebSession:
 
     async def request_tool_approval(self, tool_call_id: str) -> tuple[bool, bool]:
         """Request approval for a tool call. Returns (approved, always_allow)."""
-        self._approval_event = asyncio.Event()
-        self._approval_response = None
+        event = asyncio.Event()
+        self._pending_approvals[tool_call_id] = (event, None)
 
         # Wait for approval response
-        await self._approval_event.wait()
+        await event.wait()
 
-        if self._approval_response is None:
+        # Get the response and clean up
+        entry = self._pending_approvals.pop(tool_call_id, None)
+        if entry is None or entry[1] is None:
             return False, False
 
-        return self._approval_response
+        return entry[1]
 
-    def respond_to_approval(self, approved: bool, always_allow: bool = False) -> None:
+    def respond_to_approval(
+        self, tool_call_id: str, approved: bool, always_allow: bool = False
+    ) -> None:
         """Respond to a pending approval request."""
-        self._approval_response = (approved, always_allow)
-        if self._approval_event:
-            self._approval_event.set()
+        if tool_call_id not in self._pending_approvals:
+            return
+
+        event, _ = self._pending_approvals[tool_call_id]
+        self._pending_approvals[tool_call_id] = (event, (approved, always_allow))
+        event.set()
 
     def to_summary(self) -> SessionSummary:
         """Convert to session summary."""

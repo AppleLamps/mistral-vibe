@@ -77,11 +77,21 @@ class WebSocketMessage(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class AttachmentData(BaseModel):
+    """A file attachment."""
+
+    name: str
+    type: str  # MIME type
+    size: int
+    data: str  # base64 encoded content
+
+
 class UserMessageData(BaseModel):
     """Data for user message."""
 
-    content: str
-    attachments: list[dict[str, Any]] = Field(default_factory=list)
+    content: str = ""
+    attachments: list[AttachmentData] = Field(default_factory=list)
+    search_enabled: bool = False
 
 
 class AssistantChunkData(BaseModel):
@@ -142,3 +152,15 @@ class ToolInfo(BaseModel):
     name: str
     description: str
     permission: str = "ask"
+
+
+class SetModelRequest(BaseModel):
+    """Request to set active model."""
+
+    model: str
+
+
+class RenameSessionRequest(BaseModel):
+    """Request to rename a session."""
+
+    name: str

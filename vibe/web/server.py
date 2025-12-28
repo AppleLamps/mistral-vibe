@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from datetime import datetime
 from pathlib import Path
@@ -24,15 +25,19 @@ from vibe.core.types import (
     ToolResultEvent,
 )
 from vibe.web.schemas import (
+    AttachmentData,
     ChatMessage,
     ConfigResponse,
     CreateSessionRequest,
     CreateSessionResponse,
     ErrorData,
+    RenameSessionRequest,
     SessionDetail,
     SessionSummary,
+    SetModelRequest,
     ToolApprovalResponseData,
     ToolInfo,
+    UserMessageData,
     WebMessageType,
     WebSocketMessage,
 )
@@ -184,6 +189,42 @@ def register_routes(app: FastAPI) -> None:
 
         return tools
 
+    @app.post("/api/config/model")
+    async def set_model(request: SetModelRequest) -> dict[str, str]:
+        """Set the active model."""
+        manager = get_session_manager()
+        config = manager.config
+
+        # Validate model exists
+        valid_models = [m.name for m in config.models] + [m.alias for m in config.models if m.alias]
+        if request.model not in valid_models:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid model. Available: {', '.join(valid_models)}",
+            )
+
+        config.active_model = request.model
+        return {"model": config.active_model}
+
+    @app.patch("/api/sessions/{session_id}")
+    async def rename_session(
+        session_id: str, request: RenameSessionRequest
+    ) -> dict[str, str]:
+        """Rename a session."""
+        manager = get_session_manager()
+        session = await manager.get_session(session_id)
+
+        if not session:
+            session = await manager.load_session(session_id)
+
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        session.name = request.name
+        session.updated_at = datetime.now()
+
+        return {"name": session.name}
+
     @app.websocket("/ws/chat/{session_id}")
     async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
         """WebSocket endpoint for real-time chat."""
@@ -244,6 +285,7 @@ async def handle_websocket_session(
             elif msg_type == WebMessageType.TOOL_APPROVAL_RESPONSE:
                 approval_data = ToolApprovalResponseData(**data)
                 session.respond_to_approval(
+                    approval_data.tool_call_id,
                     approval_data.approved,
                     approval_data.always_allow,
                 )
@@ -262,6 +304,37 @@ async def handle_websocket_session(
             })
 
 
+def _process_attachments(attachments: list[AttachmentData]) -> str:
+    """Process attachments and return content to append to message."""
+    parts: list[str] = []
+
+    for attachment in attachments:
+        mime_type = attachment.type
+        name = attachment.name
+
+        # Handle text-based files
+        if mime_type.startswith("text/") or mime_type in (
+            "application/json",
+            "application/xml",
+            "application/javascript",
+        ) or name.endswith((".py", ".js", ".ts", ".tsx", ".jsx", ".md", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".sh", ".bash", ".zsh", ".fish", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".swift", ".kt", ".scala", ".r", ".sql")):
+            try:
+                decoded = base64.b64decode(attachment.data).decode("utf-8")
+                parts.append(f"\n\n--- File: {name} ---\n```\n{decoded}\n```")
+            except Exception:
+                parts.append(f"\n\n[Attached file: {name} (could not decode)]")
+
+        # Handle images - note that full vision support would require model changes
+        elif mime_type.startswith("image/"):
+            parts.append(f"\n\n[Attached image: {name}]")
+
+        # Handle PDFs and other files
+        else:
+            parts.append(f"\n\n[Attached file: {name} ({mime_type})]")
+
+    return "".join(parts)
+
+
 async def handle_user_message(
     websocket: WebSocket,
     session: WebSession,
@@ -269,8 +342,28 @@ async def handle_user_message(
     pending_approval: dict[str, asyncio.Event],
 ) -> None:
     """Handle a user message and stream the response."""
-    content = data.get("content", "")
-    if not content:
+    # Parse and validate message data
+    try:
+        msg_data = UserMessageData(**data)
+    except Exception:
+        # Fallback to raw parsing
+        msg_data = UserMessageData(
+            content=data.get("content", ""),
+            attachments=[],
+            search_enabled=data.get("search_enabled", False),
+        )
+
+    content = msg_data.content
+    attachments = msg_data.attachments
+    search_enabled = msg_data.search_enabled
+
+    # Process attachments and append to content
+    if attachments:
+        attachment_content = _process_attachments(attachments)
+        content = content + attachment_content
+
+    # Require either content or attachments
+    if not content.strip():
         return
 
     # Add user message to session
