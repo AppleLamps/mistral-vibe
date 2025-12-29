@@ -416,17 +416,33 @@ function createHistoricalToolCall(toolCall) {
     el.className = 'tool-call historical';
 
     const statusClass = toolCall.success !== false ? 'success' : 'error';
-    const toolIcon = getToolIcon(toolCall.name);
-    const statusIcon = toolCall.success !== false
-        ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>`
-        : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`;
+
+    // Parse the summary like we do for live tool calls
+    const { toolDisplay, pathOrDesc } = parseToolSummary(toolCall.name, toolCall.summary, toolCall.arguments);
+
+    // Get a result summary if available
+    let resultLine = '';
+    if (toolCall.result_summary) {
+        const resultClass = toolCall.success === false ? 'error' : '';
+        resultLine = `
+            <div class="tool-call-result-line">
+                <span class="tool-call-tree-connector">└</span>
+                <span class="tool-call-result-text ${resultClass}">${escapeHtml(toolCall.result_summary)}</span>
+            </div>
+        `;
+    }
 
     el.innerHTML = `
-        <div class="tool-call-header">
-            <span class="tool-call-icon">${toolIcon}</span>
-            <span class="tool-call-summary">${escapeHtml(toolCall.summary || toolCall.name)}</span>
-            <span class="tool-call-status ${statusClass}">${statusIcon}</span>
+        <div class="tool-call-main">
+            <span class="tool-call-dot ${statusClass}"></span>
+            <div class="tool-call-content">
+                <div class="tool-call-header">
+                    <span class="tool-call-name">${escapeHtml(toolDisplay)}</span>
+                    <span class="tool-call-path">${escapeHtml(pathOrDesc)}</span>
+                </div>
+            </div>
         </div>
+        ${resultLine}
     `;
     return el;
 }
@@ -514,43 +530,43 @@ function handleToolCall(data) {
     toolCallEl.dataset.toolCallId = data.id;
     toolCallEl.dataset.toolName = data.name;
 
-    // Use summary if available, otherwise fall back to tool name
-    const displaySummary = data.summary || data.name;
-    const toolIcon = getToolIcon(data.name);
+    // Parse the summary to extract meaningful parts
+    const { toolDisplay, pathOrDesc } = parseToolSummary(data.name, data.summary, data.arguments);
 
     toolCallEl.innerHTML = `
-        <div class="tool-call-header" role="button" tabindex="0" aria-expanded="false">
-            <span class="tool-call-icon">${toolIcon}</span>
-            <span class="tool-call-summary">${escapeHtml(displaySummary)}</span>
-            <span class="tool-call-status pending">
-                <span class="spinner"></span>
-            </span>
-            <button class="tool-call-toggle" aria-label="Toggle details">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M6 9l6 6 6-6"/>
-                </svg>
-            </button>
+        <div class="tool-call-main" role="button" tabindex="0" aria-expanded="false">
+            <span class="tool-call-dot pending"></span>
+            <div class="tool-call-content">
+                <div class="tool-call-header">
+                    <span class="tool-call-name">${escapeHtml(toolDisplay)}</span>
+                    <span class="tool-call-path">${escapeHtml(pathOrDesc)}</span>
+                </div>
+            </div>
         </div>
-        <div class="tool-call-body collapsed">
-            <pre class="tool-call-args">${escapeHtml(JSON.stringify(data.arguments, null, 2))}</pre>
-            <div class="tool-call-result"></div>
+        <div class="tool-call-result-line"></div>
+        <div class="tool-call-details hidden">
+            <div class="tool-call-details-section">
+                <div class="tool-call-details-label">Arguments</div>
+                <pre>${escapeHtml(JSON.stringify(data.arguments, null, 2))}</pre>
+            </div>
+            <div class="tool-call-details-section tool-call-output-section" style="display: none;">
+                <div class="tool-call-details-label">Output</div>
+                <pre class="tool-call-output"></pre>
+            </div>
         </div>
     `;
 
-    // Add toggle functionality
-    const header = toolCallEl.querySelector('.tool-call-header');
-    const body = toolCallEl.querySelector('.tool-call-body');
-    const toggleBtn = toolCallEl.querySelector('.tool-call-toggle');
+    // Add toggle functionality for details
+    const mainEl = toolCallEl.querySelector('.tool-call-main');
+    const detailsEl = toolCallEl.querySelector('.tool-call-details');
 
     const toggleExpand = () => {
-        const isCollapsed = body.classList.contains('collapsed');
-        body.classList.toggle('collapsed');
-        header.setAttribute('aria-expanded', isCollapsed);
-        toggleBtn.style.transform = isCollapsed ? 'rotate(180deg)' : '';
+        const isHidden = detailsEl.classList.toggle('hidden');
+        mainEl.setAttribute('aria-expanded', !isHidden);
     };
 
-    header.addEventListener('click', toggleExpand);
-    header.addEventListener('keydown', (e) => {
+    mainEl.addEventListener('click', toggleExpand);
+    mainEl.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             toggleExpand();
@@ -571,59 +587,128 @@ function handleToolCall(data) {
     scrollToBottom();
 }
 
+// Parse tool summary into display components
+function parseToolSummary(toolName, summary, args) {
+    let toolDisplay = toolName;
+    let pathOrDesc = '';
+
+    // Map tool names to display names
+    const toolDisplayNames = {
+        'read_file': 'Read',
+        'write_file': 'Write',
+        'edit_file': 'Edit',
+        'bash': 'Bash',
+        'list_dir': 'List',
+        'grep': 'Grep',
+        'glob': 'Glob',
+        'web_search': 'WebSearch',
+        'web_fetch': 'WebFetch',
+        'todo_write': 'Update Todos',
+        'task': 'Task',
+    };
+
+    toolDisplay = toolDisplayNames[toolName] || toolName;
+
+    // Extract path or description from args or summary
+    if (args) {
+        if (args.file_path) {
+            pathOrDesc = args.file_path;
+        } else if (args.path) {
+            pathOrDesc = args.path;
+        } else if (args.command) {
+            pathOrDesc = args.command.length > 60 ? args.command.substring(0, 60) + '...' : args.command;
+        } else if (args.query) {
+            pathOrDesc = args.query;
+        } else if (args.pattern) {
+            pathOrDesc = args.pattern;
+        } else if (args.url) {
+            pathOrDesc = args.url;
+        } else if (summary && summary !== toolName) {
+            pathOrDesc = summary;
+        }
+    } else if (summary && summary !== toolName) {
+        pathOrDesc = summary;
+    }
+
+    return { toolDisplay, pathOrDesc };
+}
+
 function handleToolResult(data) {
     const toolCallEl = document.querySelector(`.tool-call[data-tool-call-id="${data.tool_call_id}"]`);
     if (!toolCallEl) return;
 
-    // Update status indicator in header
-    const statusEl = toolCallEl.querySelector('.tool-call-status');
-    statusEl.classList.remove('pending');
+    // Update status dot
+    const dotEl = toolCallEl.querySelector('.tool-call-dot');
+    dotEl.classList.remove('pending');
 
+    let statusClass = 'success';
+    let resultClass = '';
     if (data.error) {
-        statusEl.classList.add('error');
-        statusEl.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"/>
-            <line x1="15" y1="9" x2="9" y2="15"/>
-            <line x1="9" y1="9" x2="15" y2="15"/>
-        </svg>`;
+        statusClass = 'error';
+        resultClass = 'error';
     } else if (data.skipped) {
-        statusEl.classList.add('skipped');
-        statusEl.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"/>
-            <line x1="8" y1="12" x2="16" y2="12"/>
-        </svg>`;
-    } else {
-        statusEl.classList.add('success');
-        statusEl.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="20 6 9 17 4 12"/>
-        </svg>`;
+        statusClass = 'skipped';
+        resultClass = 'warning';
+    }
+    dotEl.classList.add(statusClass);
+
+    // Update result line with summary
+    const resultLineEl = toolCallEl.querySelector('.tool-call-result-line');
+    const resultSummary = parseResultSummary(data);
+
+    if (resultSummary) {
+        resultLineEl.innerHTML = `
+            <span class="tool-call-tree-connector">└</span>
+            <span class="tool-call-result-text ${resultClass}">${escapeHtml(resultSummary)}</span>
+            ${data.duration ? `<span class="tool-call-duration">${data.duration.toFixed(2)}s</span>` : ''}
+        `;
     }
 
-    // Update summary with result info
-    const summaryEl = toolCallEl.querySelector('.tool-call-summary');
-    if (data.summary) {
-        summaryEl.textContent = data.summary;
-    }
-
-    // Add duration if available
-    if (data.duration) {
-        let durationEl = toolCallEl.querySelector('.tool-call-duration');
-        if (!durationEl) {
-            durationEl = document.createElement('span');
-            durationEl.className = 'tool-call-duration';
-            statusEl.parentElement.insertBefore(durationEl, statusEl);
-        }
-        durationEl.textContent = `${data.duration.toFixed(2)}s`;
-    }
-
-    // Populate result section if there's content
-    const resultEl = toolCallEl.querySelector('.tool-call-result');
+    // Populate output section if there's content
     if (data.full_result || data.error) {
+        const outputSection = toolCallEl.querySelector('.tool-call-output-section');
+        const outputEl = toolCallEl.querySelector('.tool-call-output');
         const content = data.error || data.full_result || '';
-        resultEl.innerHTML = `<pre>${escapeHtml(content)}</pre>`;
+        outputEl.textContent = content;
+        outputSection.style.display = 'block';
     }
 
     scrollToBottom();
+}
+
+// Parse result into a human-readable summary line
+function parseResultSummary(data) {
+    if (data.error) {
+        return data.error.split('\n')[0]; // First line of error
+    }
+
+    if (data.skipped) {
+        return 'Skipped';
+    }
+
+    if (data.summary) {
+        // Extract meaningful info from summary
+        const summary = data.summary;
+
+        // Common patterns
+        if (summary.includes('Read')) {
+            const match = summary.match(/Read (\d+) lines?/i);
+            if (match) return `Read ${match[1]} lines`;
+        }
+        if (summary.includes('lines')) {
+            return summary;
+        }
+        if (summary.includes('Wrote') || summary.includes('Written')) {
+            return summary;
+        }
+        if (summary.includes('Edit')) {
+            return summary;
+        }
+
+        return summary;
+    }
+
+    return null;
 }
 
 function handleToolApprovalRequest(data) {
