@@ -77,6 +77,24 @@ def _sanitize_error_message(error: Exception) -> str:
     return safe_messages.get(error_type, "An internal error occurred")
 
 
+async def _safe_send_json(websocket: WebSocket, data: dict[str, Any]) -> bool:
+    """Safely send JSON over WebSocket, ignoring connection errors.
+
+    Returns True if send succeeded, False if connection was closed.
+    """
+    try:
+        await websocket.send_json(data)
+        return True
+    except (WebSocketDisconnect, RuntimeError) as e:
+        # Connection already closed - log and ignore
+        logger.debug("WebSocket send failed (connection closed): %s", e)
+        return False
+    except Exception as e:
+        # Unexpected error - log but don't raise
+        logger.warning("Unexpected WebSocket send error: %s", e)
+        return False
+
+
 def _verify_api_key(provided_key: str | None) -> bool:
     """Verify API key using constant-time comparison."""
     if _api_key is None:
@@ -471,7 +489,8 @@ def register_routes(app: FastAPI) -> None:
                 await manager.save_session(session)
             except Exception as e:
                 logger.exception("WebSocket error: %s", e)
-                await websocket.send_json({
+                # Use safe send - connection may already be closed
+                await _safe_send_json(websocket, {
                     "type": WebMessageType.ERROR,
                     "data": {
                         "message": _sanitize_error_message(e),
@@ -514,7 +533,8 @@ async def handle_websocket_session(
                 )
 
         except json.JSONDecodeError:
-            await websocket.send_json({
+            # Use safe send - connection may already be closed
+            await _safe_send_json(websocket, {
                 "type": WebMessageType.ERROR,
                 "data": {"message": "Invalid JSON format", "code": "INVALID_JSON"},
             })
@@ -522,7 +542,8 @@ async def handle_websocket_session(
             raise
         except Exception as e:
             logger.exception("Message handling error: %s", e)
-            await websocket.send_json({
+            # Use safe send - connection may already be closed
+            await _safe_send_json(websocket, {
                 "type": WebMessageType.ERROR,
                 "data": {
                     "message": _sanitize_error_message(e),
@@ -878,7 +899,8 @@ async def handle_user_message(
 
     except Exception as e:
         logger.exception("Agent error: %s", e)
-        await websocket.send_json({
+        # Use safe send - connection may already be closed
+        await _safe_send_json(websocket, {
             "type": WebMessageType.ERROR,
             "data": {"message": _sanitize_error_message(e), "code": "AGENT_ERROR"},
         })

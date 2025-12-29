@@ -384,29 +384,28 @@ function handleSessionInfo(data) {
 function appendAssistantMessageWithHistory(msg) {
     const messageEl = createAssistantMessage();
     const contentEl = messageEl.querySelector('.message-content');
+    const toolCallsContainer = messageEl.querySelector('.tool-calls-container');
+    const textContentEl = messageEl.querySelector('.text-content');
 
-    // Add reasoning section if present
+    // Add reasoning section if present (before tool calls)
     if (msg.reasoning) {
         const reasoningSection = createReasoningSection();
         const reasoningContent = reasoningSection.querySelector('.reasoning-content');
         reasoningContent.textContent = msg.reasoning;
-        contentEl.appendChild(reasoningSection);
+        contentEl.insertBefore(reasoningSection, toolCallsContainer);
     }
 
     // Add tool calls history if present
     if (msg.tool_calls && msg.tool_calls.length > 0) {
         msg.tool_calls.forEach(tc => {
             const toolEl = createHistoricalToolCall(tc);
-            contentEl.appendChild(toolEl);
+            toolCallsContainer.appendChild(toolEl);
         });
     }
 
     // Add text content (skip if it's just a tool execution marker)
     if (msg.content && !msg.content.startsWith('[Executed')) {
-        const textDiv = document.createElement('div');
-        textDiv.className = 'assistant-text-content';
-        textDiv.innerHTML = sanitizeHTML(marked.parse(msg.content));
-        contentEl.appendChild(textDiv);
+        textContentEl.innerHTML = sanitizeHTML(marked.parse(msg.content));
     }
 
     elements.messages.appendChild(messageEl);
@@ -416,16 +415,15 @@ function createHistoricalToolCall(toolCall) {
     const el = document.createElement('div');
     el.className = 'tool-call historical';
 
-    const statusIcon = toolCall.success !== false ? '&#10003;' : '&#10007;';
     const statusClass = toolCall.success !== false ? 'success' : 'error';
+    const toolIcon = getToolIcon(toolCall.name);
+    const statusIcon = toolCall.success !== false
+        ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>`
+        : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`;
 
     el.innerHTML = `
         <div class="tool-call-header">
-            <span class="tool-call-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
-                </svg>
-            </span>
+            <span class="tool-call-icon">${toolIcon}</span>
             <span class="tool-call-summary">${escapeHtml(toolCall.summary || toolCall.name)}</span>
             <span class="tool-call-status ${statusClass}">${statusIcon}</span>
         </div>
@@ -446,11 +444,12 @@ function handleAssistantChunk(data) {
         elements.messages.appendChild(streamingMessage);
     }
 
-    const contentEl = streamingMessage.querySelector('.message-content');
-    const currentContent = contentEl.dataset.rawContent || '';
+    // Target the text-content container, not message-content (preserves tool calls)
+    const textContentEl = streamingMessage.querySelector('.text-content');
+    const currentContent = textContentEl.dataset.rawContent || '';
     const newContent = currentContent + data.content;
-    contentEl.dataset.rawContent = newContent;
-    contentEl.innerHTML = sanitizeHTML(marked.parse(newContent));
+    textContentEl.dataset.rawContent = newContent;
+    textContentEl.innerHTML = sanitizeHTML(marked.parse(newContent));
 
     scrollToBottom();
 }
@@ -473,44 +472,92 @@ function handleAssistantDone(data) {
     scrollToBottom();
 }
 
+// Get appropriate icon for each tool type
+function getToolIcon(toolName) {
+    const icons = {
+        read_file: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="16" y1="13" x2="8" y2="13"/>
+            <line x1="16" y1="17" x2="8" y2="17"/>
+        </svg>`,
+        write_file: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+        </svg>`,
+        bash: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="4 17 10 11 4 5"/>
+            <line x1="12" y1="19" x2="20" y2="19"/>
+        </svg>`,
+        list_dir: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+        </svg>`,
+        grep: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/>
+            <path d="M21 21l-4.35-4.35"/>
+        </svg>`,
+        web_search: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="2" y1="12" x2="22" y2="12"/>
+            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+        </svg>`,
+        default: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+        </svg>`,
+    };
+    return icons[toolName] || icons.default;
+}
+
 function handleToolCall(data) {
     const toolCallEl = document.createElement('div');
     toolCallEl.className = 'tool-call';
     toolCallEl.dataset.toolCallId = data.id;
+    toolCallEl.dataset.toolName = data.name;
 
     // Use summary if available, otherwise fall back to tool name
     const displaySummary = data.summary || data.name;
+    const toolIcon = getToolIcon(data.name);
 
     toolCallEl.innerHTML = `
-        <div class="tool-call-header">
-            <span class="tool-call-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
-                </svg>
-            </span>
+        <div class="tool-call-header" role="button" tabindex="0" aria-expanded="false">
+            <span class="tool-call-icon">${toolIcon}</span>
             <span class="tool-call-summary">${escapeHtml(displaySummary)}</span>
-            <button class="tool-call-expand" aria-label="Show details">
+            <span class="tool-call-status pending">
+                <span class="spinner"></span>
+            </span>
+            <button class="tool-call-toggle" aria-label="Toggle details">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M9 18l6-6-6-6"/>
+                    <path d="M6 9l6 6 6-6"/>
                 </svg>
             </button>
         </div>
-        <div class="tool-call-body">
-            <div class="tool-call-details hidden">
-                <pre class="tool-call-args">${escapeHtml(JSON.stringify(data.arguments, null, 2))}</pre>
-            </div>
+        <div class="tool-call-body collapsed">
+            <pre class="tool-call-args">${escapeHtml(JSON.stringify(data.arguments, null, 2))}</pre>
+            <div class="tool-call-result"></div>
         </div>
     `;
 
-    // Add click handler to expand/collapse details
-    const expandBtn = toolCallEl.querySelector('.tool-call-expand');
-    expandBtn.addEventListener('click', () => {
-        const details = toolCallEl.querySelector('.tool-call-details');
-        const isHidden = details.classList.toggle('hidden');
-        expandBtn.style.transform = isHidden ? '' : 'rotate(90deg)';
+    // Add toggle functionality
+    const header = toolCallEl.querySelector('.tool-call-header');
+    const body = toolCallEl.querySelector('.tool-call-body');
+    const toggleBtn = toolCallEl.querySelector('.tool-call-toggle');
+
+    const toggleExpand = () => {
+        const isCollapsed = body.classList.contains('collapsed');
+        body.classList.toggle('collapsed');
+        header.setAttribute('aria-expanded', isCollapsed);
+        toggleBtn.style.transform = isCollapsed ? 'rotate(180deg)' : '';
+    };
+
+    header.addEventListener('click', toggleExpand);
+    header.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            toggleExpand();
+        }
     });
 
-    // Add to current assistant message or create new one
+    // Add to tool-calls-container in current assistant message
     let assistantMessage = document.querySelector('.message.assistant.streaming');
     if (!assistantMessage) {
         assistantMessage = createAssistantMessage();
@@ -518,8 +565,8 @@ function handleToolCall(data) {
         elements.messages.appendChild(assistantMessage);
     }
 
-    const contentEl = assistantMessage.querySelector('.message-content');
-    contentEl.appendChild(toolCallEl);
+    const toolCallsContainer = assistantMessage.querySelector('.tool-calls-container');
+    toolCallsContainer.appendChild(toolCallEl);
 
     scrollToBottom();
 }
@@ -528,47 +575,54 @@ function handleToolResult(data) {
     const toolCallEl = document.querySelector(`.tool-call[data-tool-call-id="${data.tool_call_id}"]`);
     if (!toolCallEl) return;
 
-    const resultEl = document.createElement('div');
-    resultEl.className = 'tool-result';
+    // Update status indicator in header
+    const statusEl = toolCallEl.querySelector('.tool-call-status');
+    statusEl.classList.remove('pending');
 
     if (data.error) {
-        resultEl.classList.add('error');
-        resultEl.innerHTML = `
-            <div class="tool-result-summary">
-                <span class="tool-result-icon">&#10007;</span>
-                <span class="tool-result-message">${escapeHtml(data.summary || data.error)}</span>
-            </div>`;
+        statusEl.classList.add('error');
+        statusEl.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="15" y1="9" x2="9" y2="15"/>
+            <line x1="9" y1="9" x2="15" y2="15"/>
+        </svg>`;
     } else if (data.skipped) {
-        resultEl.classList.add('skipped');
-        resultEl.innerHTML = `
-            <div class="tool-result-summary">
-                <span class="tool-result-icon">&#8856;</span>
-                <span class="tool-result-message">${escapeHtml(data.summary || 'Skipped')}</span>
-            </div>`;
+        statusEl.classList.add('skipped');
+        statusEl.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="8" y1="12" x2="16" y2="12"/>
+        </svg>`;
     } else {
-        resultEl.classList.add('success');
-        const hasDetails = data.full_result && data.full_result.length > 0;
-
-        resultEl.innerHTML = `
-            <div class="tool-result-summary${hasDetails ? ' expandable' : ''}">
-                <span class="tool-result-icon success">&#10003;</span>
-                <span class="tool-result-message">${escapeHtml(data.summary || 'Success')}</span>
-                ${hasDetails ? '<span class="expand-hint">(click to expand)</span>' : ''}
-                ${data.duration ? `<span class="duration">${data.duration.toFixed(2)}s</span>` : ''}
-            </div>
-            ${hasDetails ? `<div class="tool-result-details hidden"><pre>${escapeHtml(data.full_result)}</pre></div>` : ''}`;
-
-        if (hasDetails) {
-            resultEl.querySelector('.tool-result-summary').addEventListener('click', () => {
-                const details = resultEl.querySelector('.tool-result-details');
-                const hint = resultEl.querySelector('.expand-hint');
-                const isHidden = details.classList.toggle('hidden');
-                hint.textContent = isHidden ? '(click to expand)' : '(click to collapse)';
-            });
-        }
+        statusEl.classList.add('success');
+        statusEl.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="20 6 9 17 4 12"/>
+        </svg>`;
     }
 
-    toolCallEl.querySelector('.tool-call-body').appendChild(resultEl);
+    // Update summary with result info
+    const summaryEl = toolCallEl.querySelector('.tool-call-summary');
+    if (data.summary) {
+        summaryEl.textContent = data.summary;
+    }
+
+    // Add duration if available
+    if (data.duration) {
+        let durationEl = toolCallEl.querySelector('.tool-call-duration');
+        if (!durationEl) {
+            durationEl = document.createElement('span');
+            durationEl.className = 'tool-call-duration';
+            statusEl.parentElement.insertBefore(durationEl, statusEl);
+        }
+        durationEl.textContent = `${data.duration.toFixed(2)}s`;
+    }
+
+    // Populate result section if there's content
+    const resultEl = toolCallEl.querySelector('.tool-call-result');
+    if (data.full_result || data.error) {
+        const content = data.error || data.full_result || '';
+        resultEl.innerHTML = `<pre>${escapeHtml(content)}</pre>`;
+    }
+
     scrollToBottom();
 }
 
@@ -594,12 +648,13 @@ function handleReasoning(data) {
     }
 
     const contentEl = streamingMessage.querySelector('.message-content');
+    const toolCallsContainer = streamingMessage.querySelector('.tool-calls-container');
 
-    // Find or create reasoning section
+    // Find or create reasoning section (before tool calls container)
     let reasoningSection = contentEl.querySelector('.reasoning-section');
     if (!reasoningSection) {
         reasoningSection = createReasoningSection();
-        contentEl.insertBefore(reasoningSection, contentEl.firstChild);
+        contentEl.insertBefore(reasoningSection, toolCallsContainer);
     }
 
     // Update reasoning content
@@ -715,7 +770,10 @@ function createAssistantMessage() {
             <div class="message-avatar">V</div>
             <span class="message-role">Vibe</span>
         </div>
-        <div class="message-content"></div>
+        <div class="message-content">
+            <div class="tool-calls-container"></div>
+            <div class="text-content"></div>
+        </div>
     `;
     return messageEl;
 }
