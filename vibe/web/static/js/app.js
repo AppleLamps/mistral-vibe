@@ -416,6 +416,7 @@ function createHistoricalToolCall(toolCall) {
     el.className = 'tool-call historical';
 
     const statusClass = toolCall.success !== false ? 'success' : 'error';
+    const ariaLabel = toolCall.success !== false ? 'Completed' : 'Failed';
 
     // Parse the summary like we do for live tool calls
     const { toolDisplay, pathOrDesc } = parseToolSummary(toolCall.name, toolCall.summary, toolCall.arguments);
@@ -426,7 +427,7 @@ function createHistoricalToolCall(toolCall) {
         const resultClass = toolCall.success === false ? 'error' : '';
         resultLine = `
             <div class="tool-call-result-line">
-                <span class="tool-call-tree-connector">└</span>
+                <span class="tool-call-tree-connector" aria-hidden="true">└</span>
                 <span class="tool-call-result-text ${resultClass}">${escapeHtml(toolCall.result_summary)}</span>
             </div>
         `;
@@ -434,7 +435,7 @@ function createHistoricalToolCall(toolCall) {
 
     el.innerHTML = `
         <div class="tool-call-main">
-            <span class="tool-call-dot ${statusClass}"></span>
+            <span class="tool-call-dot ${statusClass}" role="status" aria-label="${ariaLabel}"></span>
             <div class="tool-call-content">
                 <div class="tool-call-header">
                     <span class="tool-call-name">${escapeHtml(toolDisplay)}</span>
@@ -535,7 +536,7 @@ function handleToolCall(data) {
 
     toolCallEl.innerHTML = `
         <div class="tool-call-main" role="button" tabindex="0" aria-expanded="false">
-            <span class="tool-call-dot pending"></span>
+            <span class="tool-call-dot pending" role="status" aria-label="Running"></span>
             <div class="tool-call-content">
                 <div class="tool-call-header">
                     <span class="tool-call-name">${escapeHtml(toolDisplay)}</span>
@@ -543,11 +544,11 @@ function handleToolCall(data) {
                 </div>
             </div>
         </div>
-        <div class="tool-call-result-line"></div>
+        <div class="tool-call-result-line" aria-live="polite"></div>
         <div class="tool-call-details hidden">
             <div class="tool-call-details-section">
                 <div class="tool-call-details-label">Arguments</div>
-                <pre>${escapeHtml(JSON.stringify(data.arguments, null, 2))}</pre>
+                <pre>${escapeHtml(JSON.stringify(data.arguments || {}, null, 2))}</pre>
             </div>
             <div class="tool-call-details-section tool-call-output-section" style="display: none;">
                 <div class="tool-call-details-label">Output</div>
@@ -589,7 +590,7 @@ function handleToolCall(data) {
 
 // Parse tool summary into display components
 function parseToolSummary(toolName, summary, args) {
-    let toolDisplay = toolName;
+    let toolDisplay = toolName || 'Tool';
     let pathOrDesc = '';
 
     // Map tool names to display names
@@ -607,25 +608,24 @@ function parseToolSummary(toolName, summary, args) {
         'task': 'Task',
     };
 
-    toolDisplay = toolDisplayNames[toolName] || toolName;
+    toolDisplay = toolDisplayNames[toolName] || toolName || 'Tool';
+
+    // Safely handle null/undefined args
+    const safeArgs = args || {};
 
     // Extract path or description from args or summary
-    if (args) {
-        if (args.file_path) {
-            pathOrDesc = args.file_path;
-        } else if (args.path) {
-            pathOrDesc = args.path;
-        } else if (args.command) {
-            pathOrDesc = args.command.length > 60 ? args.command.substring(0, 60) + '...' : args.command;
-        } else if (args.query) {
-            pathOrDesc = args.query;
-        } else if (args.pattern) {
-            pathOrDesc = args.pattern;
-        } else if (args.url) {
-            pathOrDesc = args.url;
-        } else if (summary && summary !== toolName) {
-            pathOrDesc = summary;
-        }
+    if (safeArgs.file_path) {
+        pathOrDesc = safeArgs.file_path;
+    } else if (safeArgs.path) {
+        pathOrDesc = safeArgs.path;
+    } else if (safeArgs.command) {
+        pathOrDesc = safeArgs.command.length > 60 ? safeArgs.command.substring(0, 60) + '...' : safeArgs.command;
+    } else if (safeArgs.query) {
+        pathOrDesc = safeArgs.query;
+    } else if (safeArgs.pattern) {
+        pathOrDesc = safeArgs.pattern;
+    } else if (safeArgs.url) {
+        pathOrDesc = safeArgs.url;
     } else if (summary && summary !== toolName) {
         pathOrDesc = summary;
     }
@@ -639,26 +639,32 @@ function handleToolResult(data) {
 
     // Update status dot
     const dotEl = toolCallEl.querySelector('.tool-call-dot');
+    if (!dotEl) return;
+
     dotEl.classList.remove('pending');
 
     let statusClass = 'success';
     let resultClass = '';
+    let ariaLabel = 'Completed';
     if (data.error) {
         statusClass = 'error';
         resultClass = 'error';
+        ariaLabel = 'Failed';
     } else if (data.skipped) {
         statusClass = 'skipped';
         resultClass = 'warning';
+        ariaLabel = 'Skipped';
     }
     dotEl.classList.add(statusClass);
+    dotEl.setAttribute('aria-label', ariaLabel);
 
     // Update result line with summary
     const resultLineEl = toolCallEl.querySelector('.tool-call-result-line');
     const resultSummary = parseResultSummary(data);
 
-    if (resultSummary) {
+    if (resultSummary && resultLineEl) {
         resultLineEl.innerHTML = `
-            <span class="tool-call-tree-connector">└</span>
+            <span class="tool-call-tree-connector" aria-hidden="true">└</span>
             <span class="tool-call-result-text ${resultClass}">${escapeHtml(resultSummary)}</span>
             ${data.duration ? `<span class="tool-call-duration">${data.duration.toFixed(2)}s</span>` : ''}
         `;
@@ -668,9 +674,11 @@ function handleToolResult(data) {
     if (data.full_result || data.error) {
         const outputSection = toolCallEl.querySelector('.tool-call-output-section');
         const outputEl = toolCallEl.querySelector('.tool-call-output');
-        const content = data.error || data.full_result || '';
-        outputEl.textContent = content;
-        outputSection.style.display = 'block';
+        if (outputSection && outputEl) {
+            const content = data.error || data.full_result || '';
+            outputEl.textContent = content;
+            outputSection.style.display = 'block';
+        }
     }
 
     scrollToBottom();
