@@ -166,6 +166,7 @@ class BashResult(BaseModel):
 
 class Bash(BaseTool[BashArgs, BashResult, BashToolConfig, BaseToolState]):
     description: ClassVar[str] = "Run a one-off bash command and capture its output."
+    modifies_state: ClassVar[bool] = True  # Can modify files via shell commands
 
     def check_allowlist_denylist(self, args: BashArgs) -> ToolPermission | None:
         command_parts = re.split(r"(?:&&|\|\||;|\|)", args.command)

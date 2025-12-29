@@ -6,6 +6,11 @@ from typing import ClassVar, final
 import aiofiles
 from pydantic import BaseModel, Field
 
+from vibe.core.path_security import (
+    PathSecurityError,
+    case_insensitive_fnmatch,
+    validate_safe_path,
+)
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -49,6 +54,7 @@ class WriteFile(
     description: ClassVar[str] = (
         "Create or overwrite a UTF-8 file. Fails if file exists unless 'overwrite=True'."
     )
+    modifies_state: ClassVar[bool] = True  # Creates or overwrites files
 
     @classmethod
     def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
@@ -77,19 +83,17 @@ class WriteFile(
         return "Writing file"
 
     def check_allowlist_denylist(self, args: WriteFileArgs) -> ToolPermission | None:
-        import fnmatch
-
         file_path = Path(args.path).expanduser()
         if not file_path.is_absolute():
             file_path = self.config.effective_workdir / file_path
         file_str = str(file_path)
 
         for pattern in self.config.denylist:
-            if fnmatch.fnmatch(file_str, pattern):
+            if case_insensitive_fnmatch(file_str, pattern):
                 return ToolPermission.NEVER
 
         for pattern in self.config.allowlist:
-            if fnmatch.fnmatch(file_str, pattern):
+            if case_insensitive_fnmatch(file_str, pattern):
                 return ToolPermission.ALWAYS
 
         return None
@@ -127,10 +131,11 @@ class WriteFile(
             file_path = self.config.effective_workdir / file_path
         file_path = file_path.resolve()
 
+        project_root = self.config.effective_workdir.resolve()
         try:
-            file_path.relative_to(self.config.effective_workdir.resolve())
-        except ValueError:
-            raise ToolError(f"Cannot write outside project directory: {file_path}")
+            validate_safe_path(file_path, project_root)
+        except PathSecurityError as e:
+            raise ToolError(str(e))
 
         file_existed = file_path.exists()
 

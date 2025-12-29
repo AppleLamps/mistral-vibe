@@ -1,0 +1,363 @@
+================================================================================
+                    MISTRAL VIBE CODE REVIEW REPORT
+                         Date: 2025-12-28
+================================================================================
+
+Executive Summary:
+------------------
+This comprehensive code review analyzes the Mistral Vibe Python codebase,
+focusing on CLI (vibe/cli/), web interface (vibe/web/), and core (vibe/core/)
+components. The codebase demonstrates generally high quality with good adoption
+of Python 3.12+ patterns, Pydantic v2 usage, and security-conscious design.
+However, several areas require attention.
+
+Overall Assessment: GOOD with areas for improvement
+- Security: GOOD (proper input validation, rate limiting, CSP headers)
+- Type Safety: GOOD (modern type hints, but some gaps)
+- Code Quality: GOOD (follows AGENTS.md guidelines mostly)
+- Test Coverage: MODERATE (web interface coverage is sparse)
+
+================================================================================
+                           CRITICAL ISSUES
+================================================================================
+
+[C-01] Web: Missing WebSocket Connection Limits
+File: vibe/web/server.py
+Lines: 377-426
+Severity: CRITICAL
+Component: Web
+
+Issue: No limit on concurrent WebSocket connections per client. A malicious
+client could open hundreds of connections and exhaust server resources.
+
+Recommendation: Add per-IP connection tracking and limit (e.g., max 10
+concurrent connections per IP).
+
+--------------------------------------------------------------------------------
+
+[C-02] Web: Missing Timeout for Tool Approval Waits
+File: vibe/web/session_manager.py
+Lines: 68-81
+Severity: CRITICAL
+Component: Web
+
+Issue: `request_tool_approval()` awaits indefinitely on `event.wait()` without
+timeout. If a client disconnects without responding, the server coroutine hangs
+forever, causing memory leaks.
+
+Code:
+    async def request_tool_approval(self, tool_call_id: str) -> tuple[bool, bool]:
+        event = asyncio.Event()
+        self._pending_approvals[tool_call_id] = (event, None)
+        await event.wait()  # <- No timeout!
+
+Recommendation: Add `asyncio.wait_for(event.wait(), timeout=300)` with proper
+exception handling and cleanup.
+
+--------------------------------------------------------------------------------
+
+[C-03] Core: Race Condition in Parallel Tool Execution
+File: vibe/core/agent.py
+Lines: 686-748
+Severity: CRITICAL
+Component: Core
+
+Issue: While file-modifying tools run sequentially, the categorization only
+checks exact tool names. Tools with side effects on shared state (e.g., git
+operations, bash commands that modify files) can still race.
+
+    _FILE_MODIFYING_TOOLS: frozenset[str] = frozenset({
+        "write_file",
+        "search_replace",
+    })
+
+Missing: "bash", "git" tools that can also modify files.
+
+Recommendation: Expand the set or add a tool-level flag for "modifies_state".
+
+================================================================================
+                            MAJOR ISSUES
+================================================================================
+
+[M-01] Web: Rate Limiter Memory Leak
+File: vibe/web/server.py
+Lines: 110-133
+Severity: MAJOR
+Component: Web
+
+Issue: The `RateLimiter` class stores request timestamps per IP indefinitely.
+Old IPs are never removed from `self.requests` dict, causing unbounded growth.
+
+    def is_allowed(self, client_ip: str) -> bool:
+        # Cleans old requests but never removes empty IP entries
+        self.requests[client_ip] = [t for t in self.requests[client_ip] if t > minute_ago]
+
+Recommendation: Periodically prune IPs with empty request lists or use a TTL
+cache like `cachetools.TTLCache`.
+
+--------------------------------------------------------------------------------
+
+[M-02] CLI: Bare Exception Handling Swallows Errors
+File: vibe/cli/textual_ui/app.py
+Lines: 537, 680-697
+Severity: MAJOR
+Component: CLI
+
+Issue: Multiple bare `except Exception` blocks that swallow errors without
+proper logging or user feedback:
+
+    except Exception as e:
+        self.agent = None
+        log_error("Agent initialization failed", error=e, ...)
+        await self._mount_and_scroll(ErrorMessage(str(e), ...))
+
+While errors are logged, the original traceback context may be lost.
+
+Recommendation: Use `logger.exception()` to preserve full stack traces and
+consider re-raising after cleanup in critical paths.
+
+--------------------------------------------------------------------------------
+
+[M-03] Core: Missing Input Validation in Tool Invocation
+File: vibe/core/tools/base.py
+Lines: 137-149
+Severity: MAJOR
+Component: Tools
+
+Issue: The `invoke()` method catches `ValidationError` but re-raises as
+`ToolError` which may lose important validation context for debugging.
+
+    except ValidationError as err:
+        raise ToolError(f"Validation error in tool {self.get_name()}: {err}")
+
+Recommendation: Include field-level errors in the message or preserve the
+original exception chain with `from err`.
+
+--------------------------------------------------------------------------------
+
+[M-04] Web: Session Data Not Encrypted at Rest
+File: vibe/web/session_manager.py, vibe/core/interaction_logger.py
+Severity: MAJOR
+Component: Web/Core
+
+Issue: Session data including conversation history is written to disk as
+plain JSON. May contain sensitive information (API keys in prompts, etc.).
+
+Recommendation: Add optional encryption for session files or warn users about
+storing sensitive data.
+
+--------------------------------------------------------------------------------
+
+[M-05] Core: Deprecated `@app.on_event` Usage
+File: vibe/web/server.py
+Lines: 226-231
+Severity: MAJOR
+Component: Web
+
+Issue: Uses deprecated `@app.on_event("startup")` pattern instead of modern
+FastAPI lifespan context manager.
+
+    @app.on_event("startup")
+    async def start_session_cleanup() -> None:
+
+Recommendation: Migrate to `lifespan` parameter in FastAPI app initialization.
+
+================================================================================
+                            MINOR ISSUES
+================================================================================
+
+[m-01] AGENTS.md Violations: if/elif Chains Instead of match-case
+File: vibe/web/server.py
+Lines: 257-261
+Severity: MINOR
+Component: Web
+
+Issue: Uses if/elif chain for mode parsing instead of match-case:
+
+    if request.mode == "plan":
+        mode = AgentMode.PLAN
+    elif request.mode == "auto_approve":
+        mode = AgentMode.AUTO_APPROVE
+
+Recommendation: Convert to match-case per AGENTS.md guidelines.
+
+--------------------------------------------------------------------------------
+
+[m-02] Missing Type Annotations in Some Callbacks
+File: vibe/cli/textual_ui/handlers/event_handler.py
+Lines: 31-37
+Severity: MINOR
+Component: CLI
+
+Issue: Callback types use bare `Callable` without parameter/return types:
+
+    mount_callback: Callable,
+    scroll_callback: Callable,
+
+Recommendation: Use precise callable signatures like
+`Callable[[Widget], Awaitable[None]]`.
+
+--------------------------------------------------------------------------------
+
+[m-03] Inconsistent Use of Walrus Operator
+File: vibe/core/config.py
+Lines: 498-511
+Severity: MINOR
+Component: Core
+
+Issue: Some loops use walrus operator, others don't. Inconsistent style.
+
+Recommendation: Apply walrus operator consistently where it improves readability
+per AGENTS.md guidelines.
+
+--------------------------------------------------------------------------------
+
+[m-04] Missing Docstrings on Public API Methods
+Files: Multiple across vibe/web/schemas.py, vibe/core/types.py
+Severity: MINOR
+Component: All
+
+Issue: Several public Pydantic models lack docstrings explaining their purpose
+and usage (e.g., `WebSocketMessage`, `ToolCallData`).
+
+Recommendation: Add docstrings to all public classes and methods.
+
+--------------------------------------------------------------------------------
+
+[m-05] Hardcoded Magic Numbers
+File: vibe/web/server.py
+Lines: 120, 135
+Severity: MINOR
+Component: Web
+
+Issue: Magic numbers for rate limiting (120 requests, 60 seconds) are hardcoded
+rather than configurable.
+
+    RATE_LIMIT = 120  # requests per minute
+    RATE_WINDOW = 60  # seconds
+
+Recommendation: Move to configuration or environment variables.
+
+--------------------------------------------------------------------------------
+
+[m-06] Unused Imports
+File: vibe/core/utils.py
+Lines: 14
+Severity: MINOR
+Component: Core
+
+Issue: `httpx` is imported but only used for type checking in exception handler.
+
+Recommendation: Move to TYPE_CHECKING block if only used for type hints.
+
+================================================================================
+                         SECURITY OBSERVATIONS
+================================================================================
+
+[S-01] POSITIVE: Content Security Policy Headers
+File: vibe/web/server.py
+Lines: 140-160
+
+The web server implements proper CSP headers preventing XSS attacks:
+- script-src 'self' with nonces
+- style-src 'self' 'unsafe-inline' (could be stricter)
+- frame-ancestors 'none'
+
+[S-02] POSITIVE: API Key Validation
+File: vibe/web/server.py
+Lines: 170-185
+
+API key validation uses constant-time comparison via `secrets.compare_digest()`
+to prevent timing attacks.
+
+[S-03] POSITIVE: Input Sanitization in Tools
+File: vibe/core/tools/builtins/bash.py
+
+Bash tool properly validates and sanitizes commands, with dangerous command
+detection and user confirmation requirements.
+
+[S-04] CONCERN: Path Traversal Protection
+File: vibe/core/tools/builtins/read_file.py, write_file.py
+
+While path validation exists, it relies on `resolve()` which may have edge
+cases on Windows with symlinks. Consider additional validation.
+
+================================================================================
+                         TEST COVERAGE ANALYSIS
+================================================================================
+
+Current Test Structure:
+- tests/core/          - Good coverage of agent, config, types
+- tests/cli/           - Moderate coverage (clipboard, some UI)
+- tests/web/           - SPARSE coverage (only test_server.py)
+- tests/tools/         - Good coverage of builtin tools
+- tests/snapshots/     - UI snapshot tests
+
+Coverage Gaps Identified:
+
+1. Web Interface (HIGH PRIORITY):
+   - WebSocket message handling (no tests)
+   - Session lifecycle management (minimal tests)
+   - Rate limiting edge cases (no tests)
+   - Error recovery scenarios (no tests)
+
+2. CLI Components (MEDIUM PRIORITY):
+   - Event handler callbacks (partial coverage)
+   - Keyboard shortcut handling (no tests)
+   - Theme switching (no tests)
+
+3. Core Components (LOW PRIORITY - already well covered):
+   - MCP integration edge cases
+   - Tool permission escalation scenarios
+
+Recommended Test Additions:
+- tests/web/test_websocket.py - WebSocket protocol tests
+- tests/web/test_session_lifecycle.py - Session management tests
+- tests/cli/test_event_handlers.py - Event handler unit tests
+
+================================================================================
+                      AGENTS.MD COMPLIANCE SUMMARY
+================================================================================
+
+Guideline                          | Compliance | Notes
+-----------------------------------|------------|--------------------------------
+Match-Case Syntax                  | PARTIAL    | Some if/elif chains remain
+Walrus Operator                    | PARTIAL    | Inconsistent usage
+Never Nester                       | GOOD       | Early returns used well
+Modern Type Hints                  | GOOD       | Uses | union, list/dict
+Strong Static Typing               | GOOD       | Pyright compatible
+Pydantic-First Parsing             | EXCELLENT  | Consistent model_validate use
+Pathlib for File Operations        | EXCELLENT  | Consistent Path usage
+Declarative/Minimalist Code        | GOOD       | Clean abstractions
+Exception Documentation            | PARTIAL    | Some over-documentation
+Modern Enum Usage                  | GOOD       | StrEnum, auto() used
+No Inline Ignores                  | GOOD       | Minimal suppressions
+Pydantic Discriminated Unions      | GOOD       | Proper patterns used
+Use uv for All Commands            | EXCELLENT  | Consistent uv usage
+
+================================================================================
+                         RECOMMENDATIONS SUMMARY
+================================================================================
+
+Immediate Actions (This Sprint):
+1. Add WebSocket connection limits [C-01]
+2. Add timeout to tool approval waits [C-02]
+3. Fix rate limiter memory leak [M-01]
+
+Short-term (Next 2 Sprints):
+4. Expand file-modifying tools set [C-03]
+5. Improve exception handling with full traces [M-02]
+6. Migrate to FastAPI lifespan pattern [M-05]
+7. Add web interface test coverage
+
+Long-term (Backlog):
+8. Consider session data encryption [M-04]
+9. Standardize match-case usage [m-01]
+10. Add missing docstrings [m-04]
+11. Make rate limits configurable [m-05]
+
+================================================================================
+                              END OF REPORT
+================================================================================
+
+

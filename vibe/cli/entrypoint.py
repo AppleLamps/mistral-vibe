@@ -186,7 +186,7 @@ def main() -> None:
             )
         except ImportError as e:
             rprint("[red]Web dependencies not installed.[/]")
-            rprint("[yellow]Install with: pip install mistral-vibe[web][/]")
+            rprint("[yellow]Install with: pip install mistral-vibe\\[web][/]")
             sys.exit(1)
         return
 

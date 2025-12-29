@@ -104,6 +104,10 @@ class BaseTool[
 
     prompt_path: ClassVar[Path] | None = None
 
+    # Whether this tool modifies files or shared state.
+    # Tools with modifies_state=True are executed sequentially to prevent race conditions.
+    modifies_state: ClassVar[bool] = False
+
     def __init__(self, config: ToolConfig, state: ToolState) -> None:
         self.config = config
         self.state = state

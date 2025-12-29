@@ -22,6 +22,16 @@ class WebMessageType(StrEnum):
     SESSION_INFO = auto()
     COMPACT_START = auto()
     COMPACT_END = auto()
+    AGENT_STATUS = auto()  # Status updates like "Thinking...", "Running tool..."
+
+
+class ToolCallRecord(BaseModel):
+    """Record of a tool call execution."""
+
+    name: str
+    id: str
+    summary: str | None = None
+    success: bool | None = None
 
 
 class ChatMessage(BaseModel):
@@ -30,8 +40,9 @@ class ChatMessage(BaseModel):
     role: str
     content: str
     timestamp: datetime = Field(default_factory=datetime.now)
-    tool_call: dict[str, Any] | None = None
-    tool_result: dict[str, Any] | None = None
+    tool_call: dict[str, Any] | None = None  # Deprecated, kept for compatibility
+    tool_result: dict[str, Any] | None = None  # Deprecated, kept for compatibility
+    tool_calls: list[ToolCallRecord] | None = None  # New: list of executed tools
     reasoning: str | None = None
 
 
@@ -110,7 +121,7 @@ class ToolCallData(BaseModel):
     name: str
     arguments: dict[str, Any]
     requires_approval: bool = True
-    preview: str | None = None
+    summary: str | None = None  # Human-readable summary like "Running: ls -la"
 
 
 class ToolResultData(BaseModel):

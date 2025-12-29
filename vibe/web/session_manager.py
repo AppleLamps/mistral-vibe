@@ -65,13 +65,33 @@ class WebSession:
         self.chat_messages.append(message)
         self.updated_at = datetime.now()
 
-    async def request_tool_approval(self, tool_call_id: str) -> tuple[bool, bool]:
-        """Request approval for a tool call. Returns (approved, always_allow)."""
+    async def request_tool_approval(
+        self, tool_call_id: str, timeout_seconds: float = 300.0
+    ) -> tuple[bool, bool]:
+        """Request approval for a tool call. Returns (approved, always_allow).
+
+        Args:
+            tool_call_id: The unique identifier for the tool call.
+            timeout_seconds: Maximum time to wait for approval (default 5 minutes).
+
+        Returns:
+            Tuple of (approved, always_allow). Returns (False, False) on timeout.
+        """
         event = asyncio.Event()
         self._pending_approvals[tool_call_id] = (event, None)
 
-        # Wait for approval response
-        await event.wait()
+        try:
+            # Wait for approval response with timeout
+            await asyncio.wait_for(event.wait(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            # Clean up on timeout and deny the request
+            logger.warning(
+                "Tool approval request timed out after %.1f seconds: %s",
+                timeout_seconds,
+                tool_call_id,
+            )
+            self._pending_approvals.pop(tool_call_id, None)
+            return False, False
 
         # Get the response and clean up
         entry = self._pending_approvals.pop(tool_call_id, None)
@@ -128,6 +148,8 @@ class WebSession:
 
 class WebSessionManager:
     """Manages web sessions and integrates with CLI sessions."""
+
+    _session_storage_warning_logged: bool = False
 
     def __init__(self, config: VibeConfig) -> None:
         self.config = config
@@ -304,6 +326,14 @@ class WebSessionManager:
         """Save a session to disk."""
         if not self.config.session_logging.enabled:
             return
+
+        # One-time warning about unencrypted session storage
+        if not WebSessionManager._session_storage_warning_logged:
+            logger.warning(
+                "Session data is stored as unencrypted JSON on disk. "
+                "Avoid including sensitive information (API keys, credentials) in prompts."
+            )
+            WebSessionManager._session_storage_warning_logged = True
 
         if session.agent is None:
             return

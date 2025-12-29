@@ -16,6 +16,7 @@ const MessageType = {
     SESSION_INFO: 'session_info',
     COMPACT_START: 'compact_start',
     COMPACT_END: 'compact_end',
+    AGENT_STATUS: 'agent_status',
 };
 
 // App state
@@ -29,6 +30,7 @@ const state = {
     theme: 'light',
     searchEnabled: false,
     attachedFiles: [],
+    currentReasoning: '',  // Accumulate reasoning chunks for current response
 };
 
 // DOM elements
@@ -352,6 +354,10 @@ function handleWebSocketMessage(message) {
             // Could show a notification
             break;
 
+        case MessageType.AGENT_STATUS:
+            handleAgentStatus(data);
+            break;
+
         default:
             console.log('Unknown message type:', type, data);
     }
@@ -366,13 +372,65 @@ function handleSessionInfo(data) {
             if (msg.role === 'user') {
                 appendUserMessage(msg.content);
             } else if (msg.role === 'assistant') {
-                appendAssistantMessage(msg.content);
+                appendAssistantMessageWithHistory(msg);
             }
         });
         scrollToBottom();
     }
 
     updateSessionStats(data.stats);
+}
+
+function appendAssistantMessageWithHistory(msg) {
+    const messageEl = createAssistantMessage();
+    const contentEl = messageEl.querySelector('.message-content');
+
+    // Add reasoning section if present
+    if (msg.reasoning) {
+        const reasoningSection = createReasoningSection();
+        const reasoningContent = reasoningSection.querySelector('.reasoning-content');
+        reasoningContent.textContent = msg.reasoning;
+        contentEl.appendChild(reasoningSection);
+    }
+
+    // Add tool calls history if present
+    if (msg.tool_calls && msg.tool_calls.length > 0) {
+        msg.tool_calls.forEach(tc => {
+            const toolEl = createHistoricalToolCall(tc);
+            contentEl.appendChild(toolEl);
+        });
+    }
+
+    // Add text content (skip if it's just a tool execution marker)
+    if (msg.content && !msg.content.startsWith('[Executed')) {
+        const textDiv = document.createElement('div');
+        textDiv.className = 'assistant-text-content';
+        textDiv.innerHTML = sanitizeHTML(marked.parse(msg.content));
+        contentEl.appendChild(textDiv);
+    }
+
+    elements.messages.appendChild(messageEl);
+}
+
+function createHistoricalToolCall(toolCall) {
+    const el = document.createElement('div');
+    el.className = 'tool-call historical';
+
+    const statusIcon = toolCall.success !== false ? '&#10003;' : '&#10007;';
+    const statusClass = toolCall.success !== false ? 'success' : 'error';
+
+    el.innerHTML = `
+        <div class="tool-call-header">
+            <span class="tool-call-icon">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+                </svg>
+            </span>
+            <span class="tool-call-summary">${escapeHtml(toolCall.summary || toolCall.name)}</span>
+            <span class="tool-call-status ${statusClass}">${statusIcon}</span>
+        </div>
+    `;
+    return el;
 }
 
 function handleAssistantChunk(data) {
@@ -399,6 +457,7 @@ function handleAssistantChunk(data) {
 
 function handleAssistantDone(data) {
     state.isStreaming = false;
+    state.currentReasoning = '';  // Reset reasoning for next message
     updateSendButton();
     showStreamingStatus(false);
 
@@ -418,6 +477,10 @@ function handleToolCall(data) {
     const toolCallEl = document.createElement('div');
     toolCallEl.className = 'tool-call';
     toolCallEl.dataset.toolCallId = data.id;
+
+    // Use summary if available, otherwise fall back to tool name
+    const displaySummary = data.summary || data.name;
+
     toolCallEl.innerHTML = `
         <div class="tool-call-header">
             <span class="tool-call-icon">
@@ -425,12 +488,27 @@ function handleToolCall(data) {
                     <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
                 </svg>
             </span>
-            <span>${escapeHtml(data.name)}</span>
+            <span class="tool-call-summary">${escapeHtml(displaySummary)}</span>
+            <button class="tool-call-expand" aria-label="Show details">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M9 18l6-6-6-6"/>
+                </svg>
+            </button>
         </div>
         <div class="tool-call-body">
-            <pre class="tool-call-args">${escapeHtml(JSON.stringify(data.arguments, null, 2))}</pre>
+            <div class="tool-call-details hidden">
+                <pre class="tool-call-args">${escapeHtml(JSON.stringify(data.arguments, null, 2))}</pre>
+            </div>
         </div>
     `;
+
+    // Add click handler to expand/collapse details
+    const expandBtn = toolCallEl.querySelector('.tool-call-expand');
+    expandBtn.addEventListener('click', () => {
+        const details = toolCallEl.querySelector('.tool-call-details');
+        const isHidden = details.classList.toggle('hidden');
+        expandBtn.style.transform = isHidden ? '' : 'rotate(90deg)';
+    });
 
     // Add to current assistant message or create new one
     let assistantMessage = document.querySelector('.message.assistant.streaming');
@@ -448,35 +526,49 @@ function handleToolCall(data) {
 
 function handleToolResult(data) {
     const toolCallEl = document.querySelector(`.tool-call[data-tool-call-id="${data.tool_call_id}"]`);
+    if (!toolCallEl) return;
 
-    if (toolCallEl) {
-        const resultEl = document.createElement('div');
-        resultEl.className = 'tool-result';
+    const resultEl = document.createElement('div');
+    resultEl.className = 'tool-result';
 
-        if (data.error) {
-            resultEl.classList.add('error');
-            resultEl.textContent = `Error: ${data.error}`;
-        } else if (data.skipped) {
-            resultEl.classList.add('skipped');
-            resultEl.textContent = 'Skipped';
-        } else if (data.result) {
-            // Truncate long results
-            const result = data.result.length > 1000
-                ? data.result.substring(0, 1000) + '...'
-                : data.result;
-            resultEl.textContent = result;
+    if (data.error) {
+        resultEl.classList.add('error');
+        resultEl.innerHTML = `
+            <div class="tool-result-summary">
+                <span class="tool-result-icon">&#10007;</span>
+                <span class="tool-result-message">${escapeHtml(data.summary || data.error)}</span>
+            </div>`;
+    } else if (data.skipped) {
+        resultEl.classList.add('skipped');
+        resultEl.innerHTML = `
+            <div class="tool-result-summary">
+                <span class="tool-result-icon">&#8856;</span>
+                <span class="tool-result-message">${escapeHtml(data.summary || 'Skipped')}</span>
+            </div>`;
+    } else {
+        resultEl.classList.add('success');
+        const hasDetails = data.full_result && data.full_result.length > 0;
+
+        resultEl.innerHTML = `
+            <div class="tool-result-summary${hasDetails ? ' expandable' : ''}">
+                <span class="tool-result-icon success">&#10003;</span>
+                <span class="tool-result-message">${escapeHtml(data.summary || 'Success')}</span>
+                ${hasDetails ? '<span class="expand-hint">(click to expand)</span>' : ''}
+                ${data.duration ? `<span class="duration">${data.duration.toFixed(2)}s</span>` : ''}
+            </div>
+            ${hasDetails ? `<div class="tool-result-details hidden"><pre>${escapeHtml(data.full_result)}</pre></div>` : ''}`;
+
+        if (hasDetails) {
+            resultEl.querySelector('.tool-result-summary').addEventListener('click', () => {
+                const details = resultEl.querySelector('.tool-result-details');
+                const hint = resultEl.querySelector('.expand-hint');
+                const isHidden = details.classList.toggle('hidden');
+                hint.textContent = isHidden ? '(click to expand)' : '(click to collapse)';
+            });
         }
-
-        if (data.duration) {
-            const durationSpan = document.createElement('span');
-            durationSpan.style.opacity = '0.7';
-            durationSpan.textContent = ` (${data.duration.toFixed(2)}s)`;
-            resultEl.appendChild(durationSpan);
-        }
-
-        toolCallEl.querySelector('.tool-call-body').appendChild(resultEl);
     }
 
+    toolCallEl.querySelector('.tool-call-body').appendChild(resultEl);
     scrollToBottom();
 }
 
@@ -490,8 +582,63 @@ function handleToolApprovalRequest(data) {
 }
 
 function handleReasoning(data) {
-    // Could display reasoning in a collapsible section
-    console.log('Reasoning:', data.content);
+    // Accumulate reasoning content
+    state.currentReasoning += data.content;
+
+    // Find or create streaming assistant message
+    let streamingMessage = document.querySelector('.message.assistant.streaming');
+    if (!streamingMessage) {
+        streamingMessage = createAssistantMessage();
+        streamingMessage.classList.add('streaming');
+        elements.messages.appendChild(streamingMessage);
+    }
+
+    const contentEl = streamingMessage.querySelector('.message-content');
+
+    // Find or create reasoning section
+    let reasoningSection = contentEl.querySelector('.reasoning-section');
+    if (!reasoningSection) {
+        reasoningSection = createReasoningSection();
+        contentEl.insertBefore(reasoningSection, contentEl.firstChild);
+    }
+
+    // Update reasoning content
+    const reasoningContent = reasoningSection.querySelector('.reasoning-content');
+    reasoningContent.textContent = state.currentReasoning;
+
+    scrollToBottom();
+}
+
+function createReasoningSection() {
+    const section = document.createElement('div');
+    section.className = 'reasoning-section';
+    section.innerHTML = `
+        <button class="reasoning-toggle" aria-expanded="false">
+            <svg class="reasoning-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M9 18l6-6-6-6"/>
+            </svg>
+            <span>Thinking</span>
+        </button>
+        <div class="reasoning-content hidden"></div>
+    `;
+
+    // Add toggle handler
+    const toggle = section.querySelector('.reasoning-toggle');
+    toggle.addEventListener('click', () => {
+        const contentDiv = section.querySelector('.reasoning-content');
+        const chevron = section.querySelector('.reasoning-chevron');
+        const isHidden = contentDiv.classList.toggle('hidden');
+        toggle.setAttribute('aria-expanded', !isHidden);
+        chevron.style.transform = isHidden ? '' : 'rotate(90deg)';
+    });
+
+    return section;
+}
+
+function handleAgentStatus(data) {
+    state.isStreaming = true;
+    updateSendButton();
+    showStreamingStatus(true, data.message || 'Thinking...');
 }
 
 function handleError(data) {
@@ -611,9 +758,24 @@ function updateSendButton() {
     elements.sendBtn.disabled = !canSend;
 }
 
-function showStreamingStatus(show) {
+function showStreamingStatus(show, message = 'Thinking...') {
     if (show) {
         elements.streamingStatus.classList.remove('hidden');
+        // Update message text if element has a text span
+        const textEl = elements.streamingStatus.querySelector('.streaming-text');
+        if (textEl) {
+            textEl.textContent = message;
+        } else {
+            // If no dedicated text element, update the whole content
+            elements.streamingStatus.innerHTML = `
+                <div class="streaming-indicator">
+                    <span class="streaming-dot"></span>
+                    <span class="streaming-dot"></span>
+                    <span class="streaming-dot"></span>
+                </div>
+                <span class="streaming-text">${escapeHtml(message)}</span>
+            `;
+        }
     } else {
         elements.streamingStatus.classList.add('hidden');
     }

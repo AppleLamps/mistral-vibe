@@ -683,15 +683,17 @@ class Agent:
                 self.stats.tool_calls_rejected += 1
             return
 
-        # Separate file-modifying tools from parallelizable tools
+        # Separate state-modifying tools from parallelizable tools
         file_modifying_items: list[tuple[int, Any]] = []
         parallel_items: list[tuple[int, Any]] = []
 
         for i, item in enumerate(approved_tools):
             if item is None:
                 continue
-            _, tool_call, _, _ = item
-            if tool_call.tool_name in self._FILE_MODIFYING_TOOLS:
+            _, tool_call, tool_instance, _ = item
+            # Check tool-level modifies_state flag, fallback to hardcoded set
+            tool_modifies = getattr(tool_instance, "modifies_state", False)
+            if tool_modifies or tool_call.tool_name in self._FILE_MODIFYING_TOOLS:
                 file_modifying_items.append((i, item))
             else:
                 parallel_items.append((i, item))

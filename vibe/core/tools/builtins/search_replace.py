@@ -9,6 +9,7 @@ from typing import ClassVar, NamedTuple, final
 import aiofiles
 from pydantic import BaseModel, Field
 
+from vibe.core.path_security import PathSecurityError, validate_safe_path
 from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState, ToolError
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolCallEvent, ToolResultEvent
@@ -84,6 +85,7 @@ class SearchReplace(
         "Supports fuzzy matching and detailed error reporting. "
         "Format: <<<<<<< SEARCH\\n[text]\\n=======\\n[replacement]\\n>>>>>>> REPLACE"
     )
+    modifies_state: ClassVar[bool] = True  # Modifies file contents
 
     @classmethod
     def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
@@ -190,9 +192,9 @@ class SearchReplace(
         file_path = file_path.resolve()
 
         try:
-            file_path.relative_to(project_root)
-        except ValueError:
-            raise ToolError(f"Cannot edit outside project directory: {file_path}")
+            validate_safe_path(file_path, project_root)
+        except PathSecurityError as e:
+            raise ToolError(str(e))
 
         if not file_path.exists():
             raise ToolError(f"File does not exist: {file_path}")

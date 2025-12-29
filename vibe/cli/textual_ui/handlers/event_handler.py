@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from textual.widgets import Static
 
@@ -30,9 +30,9 @@ class EventHandler:
 
     def __init__(
         self,
-        mount_callback: Callable,
-        scroll_callback: Callable,
-        todo_area_callback: Callable,
+        mount_callback: Callable[[Any], Awaitable[None]],
+        scroll_callback: Callable[[], Awaitable[None]],
+        todo_area_callback: Callable[[], Any],
         get_tools_collapsed: Callable[[], bool],
         get_todos_collapsed: Callable[[], bool],
     ) -> None:

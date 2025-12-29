@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections import defaultdict
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from datetime import datetime
 import hmac
 import json
@@ -28,6 +30,7 @@ MAX_ATTACHMENTS = 10  # Maximum attachments per message
 
 from vibe.core.config import VibeConfig, load_api_keys_from_env
 from vibe.core.modes import AgentMode
+from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import (
     ApprovalResponse,
     AssistantEvent,
@@ -120,10 +123,12 @@ class RateLimiter:
         now = time.time()
         minute_ago = now - 60
 
-        # Clean old requests
-        self.requests[client_ip] = [
-            t for t in self.requests[client_ip] if t > minute_ago
-        ]
+        # Clean old requests and remove empty entries to prevent memory leak
+        filtered = [t for t in self.requests[client_ip] if t > minute_ago]
+        if filtered:
+            self.requests[client_ip] = filtered
+        else:
+            self.requests.pop(client_ip, None)
 
         # Check limit
         if len(self.requests[client_ip]) >= self.requests_per_minute:
@@ -136,6 +141,34 @@ class RateLimiter:
 _rate_limiter = RateLimiter(requests_per_minute=120)
 
 
+class ConnectionLimiter:
+    """Tracks and limits concurrent WebSocket connections per IP."""
+
+    def __init__(self, max_connections_per_ip: int = 10) -> None:
+        self.max_connections_per_ip = max_connections_per_ip
+        self._connections: dict[str, int] = defaultdict(int)
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, client_ip: str) -> bool:
+        """Try to acquire a connection slot. Returns True if allowed."""
+        async with self._lock:
+            if self._connections[client_ip] >= self.max_connections_per_ip:
+                return False
+            self._connections[client_ip] += 1
+            return True
+
+    async def release(self, client_ip: str) -> None:
+        """Release a connection slot."""
+        async with self._lock:
+            if self._connections[client_ip] > 0:
+                self._connections[client_ip] -= 1
+                if self._connections[client_ip] == 0:
+                    del self._connections[client_ip]
+
+
+_connection_limiter = ConnectionLimiter(max_connections_per_ip=10)
+
+
 def get_session_manager() -> WebSessionManager:
     """Get the global session manager."""
     global _session_manager
@@ -144,6 +177,17 @@ def get_session_manager() -> WebSessionManager:
         config = VibeConfig.load()
         _session_manager = WebSessionManager(config)
     return _session_manager
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Manage application lifespan - startup and shutdown."""
+    # Startup
+    manager = get_session_manager()
+    await manager.start_cleanup_task()
+    logger.info("Session cleanup task started")
+    yield
+    # Shutdown (if needed in future)
 
 
 def create_app(
@@ -175,6 +219,7 @@ def create_app(
         title="Mistral Vibe Web",
         description="Web interface for Mistral Vibe coding assistant",
         version="1.0.0",
+        lifespan=lifespan,
     )
 
     # Add security headers middleware first
@@ -222,14 +267,6 @@ def create_app(
     # Register routes
     register_routes(app)
 
-    # Session cleanup on startup
-    @app.on_event("startup")
-    async def start_session_cleanup() -> None:
-        """Start the session cleanup background task."""
-        manager = get_session_manager()
-        await manager.start_cleanup_task()
-        logger.info("Session cleanup task started")
-
     return app
 
 
@@ -254,11 +291,13 @@ def register_routes(app: FastAPI) -> None:
         manager = get_session_manager()
 
         # Parse mode from request
-        mode = AgentMode.DEFAULT
-        if request.mode == "plan":
-            mode = AgentMode.PLAN
-        elif request.mode == "auto_approve":
-            mode = AgentMode.AUTO_APPROVE
+        match request.mode:
+            case "plan":
+                mode = AgentMode.PLAN
+            case "auto_approve":
+                mode = AgentMode.AUTO_APPROVE
+            case _:
+                mode = AgentMode.DEFAULT
 
         session = await manager.create_session(name=request.name, mode=mode)
         return CreateSessionResponse(session_id=session.session_id, name=session.name)
@@ -395,34 +434,53 @@ def register_routes(app: FastAPI) -> None:
             await websocket.close(code=4029)
             return
 
-        manager = get_session_manager()
-        session = await manager.get_session(session_id)
-
-        if not session:
-            session = await manager.load_session(session_id)
-
-        if not session:
-            await websocket.send_json({
-                "type": WebMessageType.ERROR,
-                "data": {"message": "Session not found", "code": "SESSION_NOT_FOUND"},
-            })
-            await websocket.close()
-            return
-
-        try:
-            await handle_websocket_session(websocket, session, manager)
-        except WebSocketDisconnect:
-            # Save session on disconnect
-            await manager.save_session(session)
-        except Exception as e:
-            logger.exception("WebSocket error: %s", e)
+        # Check concurrent connection limit per IP
+        if not await _connection_limiter.acquire(client_ip):
             await websocket.send_json({
                 "type": WebMessageType.ERROR,
                 "data": {
-                    "message": _sanitize_error_message(e),
-                    "code": "INTERNAL_ERROR",
+                    "message": "Too many concurrent connections",
+                    "code": "CONNECTION_LIMIT_EXCEEDED",
                 },
             })
+            await websocket.close(code=4029)
+            return
+
+        try:
+            manager = get_session_manager()
+            session = await manager.get_session(session_id)
+
+            if not session:
+                session = await manager.load_session(session_id)
+
+            if not session:
+                await websocket.send_json({
+                    "type": WebMessageType.ERROR,
+                    "data": {
+                        "message": "Session not found",
+                        "code": "SESSION_NOT_FOUND",
+                    },
+                })
+                await websocket.close()
+                return
+
+            try:
+                await handle_websocket_session(websocket, session, manager)
+            except WebSocketDisconnect:
+                # Save session on disconnect
+                await manager.save_session(session)
+            except Exception as e:
+                logger.exception("WebSocket error: %s", e)
+                await websocket.send_json({
+                    "type": WebMessageType.ERROR,
+                    "data": {
+                        "message": _sanitize_error_message(e),
+                        "code": "INTERNAL_ERROR",
+                    },
+                })
+        finally:
+            # Always release the connection slot
+            await _connection_limiter.release(client_ip)
 
 
 async def handle_websocket_session(
@@ -534,6 +592,44 @@ def _process_attachments(attachments: list[AttachmentData]) -> str:
             parts.append(f"\n\n[Attached file: {name} ({mime_type})]")
 
     return "".join(parts)
+
+
+def _format_tool_result_for_web(event: ToolResultEvent, agent: Any) -> dict[str, Any]:
+    """Format tool result using ToolUIDataAdapter for web display."""
+    result_data: dict[str, Any] = {
+        "tool_call_id": event.tool_call_id,
+        "name": event.tool_name,
+        "skipped": event.skipped,
+    }
+
+    if event.error:
+        result_data["error"] = event.error
+        result_data["summary"] = f"Error: {event.error}"
+        result_data["success"] = False
+    elif event.skipped:
+        result_data["summary"] = event.skip_reason or "Skipped"
+        result_data["success"] = False
+    elif event.result:
+        tool_class = agent.tool_manager.available_tools().get(event.tool_name)
+        if tool_class:
+            adapter = ToolUIDataAdapter(tool_class)
+            display = adapter.get_result_display(event)
+            result_data["summary"] = display.message
+            result_data["success"] = display.success
+            result_data["warnings"] = display.warnings
+        else:
+            result_data["summary"] = "Success"
+            result_data["success"] = True
+            result_data["warnings"] = []
+
+        # Include truncated full result for expand functionality
+        full_str = str(event.result)
+        result_data["full_result"] = full_str[:5000] if len(full_str) > 5000 else full_str
+
+    if event.duration:
+        result_data["duration"] = event.duration
+
+    return result_data
 
 
 async def handle_user_message(
@@ -657,6 +753,13 @@ async def handle_user_message(
     # Track assistant response
     full_response = ""
     full_reasoning = ""
+    tool_calls_executed: list[dict[str, Any]] = []  # Track tool executions
+
+    # Send initial "thinking" status
+    await websocket.send_json({
+        "type": WebMessageType.AGENT_STATUS,
+        "data": {"status": "thinking", "message": "Thinking..."},
+    })
 
     try:
         async for event in agent.act(content):
@@ -678,33 +781,50 @@ async def handle_user_message(
                 })
 
             elif isinstance(event, ToolCallEvent):
+                # Generate human-readable summary using ToolUIDataAdapter
+                tool_class = agent.tool_manager.available_tools().get(event.tool_name)
+                summary = event.tool_name  # Default fallback
+                if tool_class:
+                    adapter = ToolUIDataAdapter(tool_class)
+                    display = adapter.get_call_display(event)
+                    summary = display.summary
+
+                # Track tool call for persistence
+                tool_calls_executed.append({
+                    "name": event.tool_name,
+                    "id": event.tool_call_id,
+                    "summary": summary,
+                })
+
+                # Send status update
+                await websocket.send_json({
+                    "type": WebMessageType.AGENT_STATUS,
+                    "data": {"status": "tool", "message": summary},
+                })
+
                 await websocket.send_json({
                     "type": WebMessageType.TOOL_CALL,
                     "data": {
                         "id": event.tool_call_id,
                         "name": event.tool_name,
+                        "summary": summary,
                         "arguments": event.args.model_dump(mode="json"),
                         "requires_approval": True,
                     },
                 })
 
             elif isinstance(event, ToolResultEvent):
-                result_data: dict[str, Any] = {
-                    "tool_call_id": event.tool_call_id,
-                    "name": event.tool_name,
-                    "skipped": event.skipped,
-                }
-                if event.result:
-                    result_data["result"] = str(event.result)
-                if event.error:
-                    result_data["error"] = event.error
-                if event.duration:
-                    result_data["duration"] = event.duration
-
+                result_data = _format_tool_result_for_web(event, agent)
                 await websocket.send_json({
                     "type": WebMessageType.TOOL_RESULT,
                     "data": result_data,
                 })
+
+                # Update tool call record with result status
+                for tc in tool_calls_executed:
+                    if tc["id"] == event.tool_call_id:
+                        tc["success"] = result_data.get("success", not event.error)
+                        break
 
             elif isinstance(event, CompactStartEvent):
                 await websocket.send_json({
@@ -730,13 +850,29 @@ async def handle_user_message(
             "data": {"content": full_response, "stats": agent.stats.model_dump()},
         })
 
-        # Add assistant message to session
-        if full_response:
+        # Add assistant message to session (save even if only tools were executed)
+        if full_response or tool_calls_executed:
+            # Build tool_calls list for persistence
+            tool_calls_for_storage = None
+            if tool_calls_executed:
+                from vibe.web.schemas import ToolCallRecord
+
+                tool_calls_for_storage = [
+                    ToolCallRecord(
+                        name=tc["name"],
+                        id=tc["id"],
+                        summary=tc.get("summary"),
+                        success=tc.get("success"),
+                    )
+                    for tc in tool_calls_executed
+                ]
+
             assistant_msg = ChatMessage(
                 role="assistant",
                 content=full_response,
                 timestamp=datetime.now(),
                 reasoning=full_reasoning if full_reasoning else None,
+                tool_calls=tool_calls_for_storage,
             )
             session.add_chat_message(assistant_msg)
 

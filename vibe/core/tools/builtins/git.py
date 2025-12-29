@@ -98,6 +98,7 @@ class Git(
         "Perform common git operations: status, add, commit, log, branch, checkout, stash. "
         "Provides structured output and better error messages than running git through bash."
     )
+    modifies_state: ClassVar[bool] = True  # Git operations modify repository state
 
     async def run(self, args: GitArgs) -> GitResult:
         if not shutil.which("git"):

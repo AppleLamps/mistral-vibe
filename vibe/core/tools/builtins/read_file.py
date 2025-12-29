@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, NamedTuple, final
 
 import aiofiles
 from pydantic import BaseModel, Field
 
+from vibe.core.path_security import (
+    PathSecurityError,
+    case_insensitive_fnmatch,
+    validate_safe_path,
+)
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -92,11 +96,11 @@ class ReadFile(
         file_str = str(file_path)
 
         for pattern in self.config.denylist:
-            if fnmatch.fnmatch(file_str, pattern):
+            if case_insensitive_fnmatch(file_str, pattern):
                 return ToolPermission.NEVER
 
         for pattern in self.config.allowlist:
-            if fnmatch.fnmatch(file_str, pattern):
+            if case_insensitive_fnmatch(file_str, pattern):
                 return ToolPermission.ALWAYS
 
         return None
@@ -166,11 +170,9 @@ class ReadFile(
         project_root = self.config.effective_workdir.resolve()
 
         try:
-            resolved_path.relative_to(project_root)
-        except ValueError:
-            raise ToolError(
-                f"Cannot read outside project directory: {resolved_path}"
-            )
+            validate_safe_path(resolved_path, project_root)
+        except PathSecurityError as e:
+            raise ToolError(str(e))
 
         if not resolved_path.exists():
             raise ToolError(f"File not found at: {resolved_path}")
