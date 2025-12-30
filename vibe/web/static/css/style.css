@@ -776,6 +776,17 @@ html, body {
     opacity: 0.9;
 }
 
+/* Content Stream - chronological display of tool calls and text */
+.content-stream {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+}
+
+.content-stream > *:empty {
+    display: none;
+}
+
 /* Tool Calls Container - Claude Code style */
 .tool-calls-container {
     display: flex;
@@ -783,6 +794,8 @@ html, body {
     gap: 2px;
     font-family: var(--font-mono);
     font-size: 13px;
+    margin-top: 4px;
+    margin-bottom: 4px;
 }
 
 .tool-calls-container:empty {
@@ -794,6 +807,16 @@ html, body {
     display: none;
 }
 
+.text-content:not(:empty) {
+    margin-top: 8px;
+}
+
+/* First text block doesn't need top margin */
+.content-stream > .text-content:first-child:not(:empty) {
+    margin-top: 0;
+}
+
+/* Space after tool calls before text */
 .tool-calls-container:not(:empty) + .text-content:not(:empty) {
     margin-top: 16px;
 }
@@ -1926,4 +1949,43 @@ html, body {
 /* Assistant Text Content */
 .assistant-text-content {
     margin-top: 8px;
+}
+
+/* Inline Status Indicator - shows within message during streaming */
+.inline-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 0;
+    color: var(--text-secondary);
+    font-size: 13px;
+    animation: fadeIn 0.2s ease;
+}
+
+.inline-status-dot {
+    width: 8px;
+    height: 8px;
+    background: var(--accent);
+    border-radius: 50%;
+    animation: dotPulse 1.2s ease-in-out infinite;
+}
+
+.inline-status-text {
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
+/* Hide inline status when there's actual content after it */
+.content-stream > .text-content:not(:empty) ~ .inline-status,
+.content-stream > .tool-calls-container:not(:empty) ~ .inline-status {
+    display: none;
 }
