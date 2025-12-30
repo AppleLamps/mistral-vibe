@@ -493,29 +493,33 @@ function handleSessionInfo(data) {
 
 function appendAssistantMessageWithHistory(msg) {
     const messageEl = createAssistantMessage();
-    const contentEl = messageEl.querySelector('.message-content');
-    const toolCallsContainer = messageEl.querySelector('.tool-calls-container');
-    const textContentEl = messageEl.querySelector('.text-content');
+    const contentStream = messageEl.querySelector('.content-stream');
 
-    // Add reasoning section if present (before tool calls)
+    // Add reasoning section if present (at the start)
     if (msg.reasoning) {
         const reasoningSection = createReasoningSection();
         const reasoningContent = reasoningSection.querySelector('.reasoning-content');
         reasoningContent.textContent = msg.reasoning;
-        contentEl.insertBefore(reasoningSection, toolCallsContainer);
+        contentStream.appendChild(reasoningSection);
     }
 
     // Add tool calls history if present
     if (msg.tool_calls && msg.tool_calls.length > 0) {
+        const toolCallsContainer = document.createElement('div');
+        toolCallsContainer.className = 'tool-calls-container';
         msg.tool_calls.forEach(tc => {
             const toolEl = createHistoricalToolCall(tc);
             toolCallsContainer.appendChild(toolEl);
         });
+        contentStream.appendChild(toolCallsContainer);
     }
 
     // Add text content (skip if it's just a tool execution marker)
     if (msg.content && !msg.content.startsWith('[Executed')) {
+        const textContentEl = document.createElement('div');
+        textContentEl.className = 'text-content';
         textContentEl.innerHTML = sanitizeHTML(marked.parse(msg.content));
+        contentStream.appendChild(textContentEl);
     }
 
     elements.messages.appendChild(messageEl);
@@ -561,7 +565,7 @@ function createHistoricalToolCall(toolCall) {
 function handleAssistantChunk(data) {
     state.isStreaming = true;
     updateSendButton();
-    showStreamingStatus(true);
+    showStreamingStatus(true, 'Writing...');
 
     let streamingMessage = document.querySelector('.message.assistant.streaming');
 
@@ -571,8 +575,14 @@ function handleAssistantChunk(data) {
         elements.messages.appendChild(streamingMessage);
     }
 
-    // Target the text-content container, not message-content (preserves tool calls)
-    const textContentEl = streamingMessage.querySelector('.text-content');
+    // Remove inline status when actual content arrives
+    const inlineStatus = streamingMessage.querySelector('.inline-status');
+    if (inlineStatus) {
+        inlineStatus.remove();
+    }
+
+    // Get or create text block in content stream (maintains chronological order)
+    const textContentEl = getOrCreateTextBlock(streamingMessage);
     const currentContent = textContentEl.dataset.rawContent || '';
     const newContent = currentContent + data.content;
     textContentEl.dataset.rawContent = newContent;
@@ -590,6 +600,29 @@ function handleAssistantDone(data) {
     const streamingMessage = document.querySelector('.message.assistant.streaming');
     if (streamingMessage) {
         streamingMessage.classList.remove('streaming');
+
+        // Remove any inline status indicators
+        const inlineStatus = streamingMessage.querySelector('.inline-status');
+        if (inlineStatus) {
+            inlineStatus.remove();
+        }
+
+        // If final content is provided, ensure text content matches
+        // This handles any potential cut-off during streaming
+        if (data.content) {
+            const textBlocks = streamingMessage.querySelectorAll('.text-content');
+            if (textBlocks.length > 0) {
+                // Update the last text block with full content if it seems incomplete
+                const lastTextBlock = textBlocks[textBlocks.length - 1];
+                const currentRaw = lastTextBlock.dataset.rawContent || '';
+                // If the final content is longer and starts with current content, update
+                if (data.content.length > currentRaw.length &&
+                    data.content.startsWith(currentRaw.substring(0, Math.min(50, currentRaw.length)))) {
+                    lastTextBlock.dataset.rawContent = data.content;
+                    lastTextBlock.innerHTML = sanitizeHTML(marked.parse(data.content));
+                }
+            }
+        }
     }
 
     if (data.stats) {
@@ -642,6 +675,9 @@ function handleToolCall(data) {
         return; // Already rendered, skip
     }
 
+    // Update streaming status to show what tool is running
+    showStreamingStatus(true, data.summary || `Running ${data.name}...`);
+
     const toolCallEl = document.createElement('div');
     toolCallEl.className = 'tool-call';
     toolCallEl.dataset.toolCallId = data.id;
@@ -690,7 +726,7 @@ function handleToolCall(data) {
         }
     });
 
-    // Add to tool-calls-container in current assistant message
+    // Get or create streaming assistant message
     let assistantMessage = document.querySelector('.message.assistant.streaming');
     if (!assistantMessage) {
         assistantMessage = createAssistantMessage();
@@ -698,7 +734,14 @@ function handleToolCall(data) {
         elements.messages.appendChild(assistantMessage);
     }
 
-    const toolCallsContainer = assistantMessage.querySelector('.tool-calls-container');
+    // Remove inline status when tool calls start executing
+    const inlineStatus = assistantMessage.querySelector('.inline-status');
+    if (inlineStatus) {
+        inlineStatus.remove();
+    }
+
+    // Add to tool-calls-container in content stream (maintains chronological order)
+    const toolCallsContainer = createToolCallsBlock(assistantMessage);
     toolCallsContainer.appendChild(toolCallEl);
 
     scrollToBottom();
@@ -848,6 +891,9 @@ function handleReasoning(data) {
     // Accumulate reasoning content
     state.currentReasoning += data.content;
 
+    // Update status to show agent is thinking
+    showStreamingStatus(true, 'Thinking...');
+
     // Find or create streaming assistant message
     let streamingMessage = document.querySelector('.message.assistant.streaming');
     if (!streamingMessage) {
@@ -856,14 +902,14 @@ function handleReasoning(data) {
         elements.messages.appendChild(streamingMessage);
     }
 
-    const contentEl = streamingMessage.querySelector('.message-content');
-    const toolCallsContainer = streamingMessage.querySelector('.tool-calls-container');
+    const contentStream = streamingMessage.querySelector('.content-stream');
 
-    // Find or create reasoning section (before tool calls container)
-    let reasoningSection = contentEl.querySelector('.reasoning-section');
+    // Find or create reasoning section at the START of content stream
+    let reasoningSection = contentStream.querySelector('.reasoning-section');
     if (!reasoningSection) {
         reasoningSection = createReasoningSection();
-        contentEl.insertBefore(reasoningSection, toolCallsContainer);
+        // Insert at the beginning of the content stream
+        contentStream.insertBefore(reasoningSection, contentStream.firstChild);
     }
 
     // Update reasoning content
@@ -902,7 +948,33 @@ function createReasoningSection() {
 function handleAgentStatus(data) {
     state.isStreaming = true;
     updateSendButton();
-    showStreamingStatus(true, data.message || 'Thinking...');
+    const statusMessage = data.message || 'Thinking...';
+    showStreamingStatus(true, statusMessage);
+
+    // Also show inline status within the message for immediate feedback
+    let streamingMessage = document.querySelector('.message.assistant.streaming');
+    if (!streamingMessage) {
+        streamingMessage = createAssistantMessage();
+        streamingMessage.classList.add('streaming');
+        elements.messages.appendChild(streamingMessage);
+    }
+
+    // Update or create inline status indicator
+    const contentStream = streamingMessage.querySelector('.content-stream');
+    let inlineStatus = contentStream.querySelector('.inline-status');
+
+    if (!inlineStatus) {
+        inlineStatus = document.createElement('div');
+        inlineStatus.className = 'inline-status';
+        contentStream.appendChild(inlineStatus);
+    }
+
+    inlineStatus.innerHTML = `
+        <span class="inline-status-dot"></span>
+        <span class="inline-status-text">${escapeHtml(statusMessage)}</span>
+    `;
+
+    scrollToBottom();
 }
 
 function handleError(data) {
@@ -980,17 +1052,50 @@ function createAssistantMessage() {
             <span class="message-role">Vibe</span>
         </div>
         <div class="message-content">
-            <div class="tool-calls-container"></div>
-            <div class="text-content"></div>
+            <div class="content-stream"></div>
         </div>
     `;
     return messageEl;
 }
 
+// Get or create the current text block in the content stream
+function getOrCreateTextBlock(streamingMessage) {
+    const contentStream = streamingMessage.querySelector('.content-stream');
+    // Check if the last child is a text-content block
+    const lastChild = contentStream.lastElementChild;
+    if (lastChild && lastChild.classList.contains('text-content')) {
+        return lastChild;
+    }
+    // Create new text block
+    const textBlock = document.createElement('div');
+    textBlock.className = 'text-content';
+    textBlock.dataset.rawContent = '';
+    contentStream.appendChild(textBlock);
+    return textBlock;
+}
+
+// Create a tool calls container in the content stream
+function createToolCallsBlock(streamingMessage) {
+    const contentStream = streamingMessage.querySelector('.content-stream');
+    // Check if the last child is a tool-calls-container
+    const lastChild = contentStream.lastElementChild;
+    if (lastChild && lastChild.classList.contains('tool-calls-container')) {
+        return lastChild;
+    }
+    // Create new tool calls container
+    const toolCallsBlock = document.createElement('div');
+    toolCallsBlock.className = 'tool-calls-container';
+    contentStream.appendChild(toolCallsBlock);
+    return toolCallsBlock;
+}
+
 function appendAssistantMessage(content) {
     const messageEl = createAssistantMessage();
-    const contentEl = messageEl.querySelector('.message-content');
-    contentEl.innerHTML = sanitizeHTML(marked.parse(content));
+    const contentStream = messageEl.querySelector('.content-stream');
+    const textContentEl = document.createElement('div');
+    textContentEl.className = 'text-content';
+    textContentEl.innerHTML = sanitizeHTML(marked.parse(content));
+    contentStream.appendChild(textContentEl);
     elements.messages.appendChild(messageEl);
 }
 
