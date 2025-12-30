@@ -526,6 +526,12 @@ function getToolIcon(toolName) {
 }
 
 function handleToolCall(data) {
+    // Prevent duplicate tool calls - check if element already exists in DOM
+    const existingEl = document.querySelector(`.tool-call[data-tool-call-id="${data.id}"]`);
+    if (existingEl) {
+        return; // Already rendered, skip
+    }
+
     const toolCallEl = document.createElement('div');
     toolCallEl.className = 'tool-call';
     toolCallEl.dataset.toolCallId = data.id;
