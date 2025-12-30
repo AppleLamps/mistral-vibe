@@ -513,6 +513,7 @@ async def handle_websocket_session(
     })
 
     pending_approval: dict[str, asyncio.Event] = {}
+    active_message_task: asyncio.Task[None] | None = None
 
     while True:
         try:
@@ -522,7 +523,22 @@ async def handle_websocket_session(
             data = message.get("data", {})
 
             if msg_type == WebMessageType.USER_MESSAGE:
-                await handle_user_message(websocket, session, data, pending_approval)
+                # Run message handling as background task so we can still receive
+                # approval responses while waiting for tool execution
+                if active_message_task and not active_message_task.done():
+                    # Previous message still processing - send error
+                    await websocket.send_json({
+                        "type": WebMessageType.ERROR,
+                        "data": {
+                            "message": "Previous message still processing",
+                            "code": "BUSY",
+                        },
+                    })
+                    continue
+
+                active_message_task = asyncio.create_task(
+                    handle_user_message(websocket, session, data, pending_approval)
+                )
 
             elif msg_type == WebMessageType.TOOL_APPROVAL_RESPONSE:
                 approval_data = ToolApprovalResponseData(**data)
@@ -539,6 +555,13 @@ async def handle_websocket_session(
                 "data": {"message": "Invalid JSON format", "code": "INVALID_JSON"},
             })
         except WebSocketDisconnect:
+            # Cancel any active message task on disconnect
+            if active_message_task and not active_message_task.done():
+                active_message_task.cancel()
+                try:
+                    await active_message_task
+                except asyncio.CancelledError:
+                    pass
             raise
         except Exception as e:
             logger.exception("Message handling error: %s", e)
