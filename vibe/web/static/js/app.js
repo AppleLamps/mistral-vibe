@@ -19,6 +19,8 @@ const MessageType = {
     AGENT_STATUS: 'agent_status',
 };
 
+const API_KEY_STORAGE_KEY = 'vibe-api-key';
+
 // App state
 const state = {
     currentSessionId: null,
@@ -27,10 +29,11 @@ const state = {
     isStreaming: false,
     pendingApproval: null,
     config: null,
+    apiKey: null,
     theme: 'light',
     searchEnabled: false,
     attachedFiles: [],
-    currentReasoning: '',  // Accumulate reasoning chunks for current response
+    currentReasoning: '',  // Accumulate reasoning chunks for current response  
 };
 
 // DOM elements
@@ -66,6 +69,13 @@ const elements = {
     cancelDeleteBtn: document.getElementById('cancelDeleteBtn'),
     deleteSessionBtn: document.getElementById('deleteSessionBtn'),
     toastContainer: document.getElementById('toastContainer'),
+    apiKeyModal: document.getElementById('apiKeyModal'),
+    apiKeyInput: document.getElementById('apiKeyInput'),
+    apiKeySaveBtn: document.getElementById('apiKeySaveBtn'),
+    apiKeyClose: document.getElementById('apiKeyClose'),
+    apiKeyClearBtn: document.getElementById('apiKeyClearBtn'),
+    apiKeyRemember: document.getElementById('apiKeyRemember'),
+    apiKeyMessage: document.getElementById('api-key-desc'),
 
     // Theme
     themeToggle: document.getElementById('themeToggle'),
@@ -110,7 +120,7 @@ renderer.code = function(code, language) {
     const langLabel = language || 'code';
     return `
         <div class="code-block-wrapper">
-            <button class="code-copy-btn" onclick="copyCode(this)" data-code="${escapeHtml(code)}">
+            <button class="code-copy-btn" data-code="${escapeHtml(code)}">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
                     <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
@@ -158,7 +168,7 @@ window.copyCode = async function(btn) {
 // Safe HTML sanitization function
 function sanitizeHTML(html) {
     if (typeof DOMPurify !== 'undefined') {
-        return DOMPurify.sanitize(html, { ADD_ATTR: ['onclick'] });
+        return DOMPurify.sanitize(html);
     }
     // Fallback if DOMPurify not loaded
     return html;
@@ -170,7 +180,7 @@ function showToast(message, type = 'info', duration = 4000) {
     toast.className = `toast ${type}`;
     toast.innerHTML = `
         <span class="toast-message">${sanitizeHTML(message)}</span>
-        <button class="toast-close" onclick="this.parentElement.remove()">&times;</button>
+        <button class="toast-close" type="button" aria-label="Close notification">&times;</button>
     `;
     elements.toastContainer?.appendChild(toast);
 
@@ -191,15 +201,105 @@ const toast = {
     info: (msg) => showToast(msg, 'info'),
 };
 
+let apiKeyPrompt = null;
+
+function setApiKey(key, persist = true) {
+    state.apiKey = key;
+    if (persist) {
+        localStorage.setItem(API_KEY_STORAGE_KEY, key);
+    } else {
+        localStorage.removeItem(API_KEY_STORAGE_KEY);
+    }
+}
+
+function clearApiKey() {
+    state.apiKey = null;
+    localStorage.removeItem(API_KEY_STORAGE_KEY);
+}
+
+function initApiKey() {
+    const params = new URLSearchParams(window.location.search);
+    const apiKeyParam = params.get('api_key');
+    if (apiKeyParam) {
+        setApiKey(apiKeyParam, true);
+        params.delete('api_key');
+        const newQuery = params.toString();
+        const baseUrl = newQuery ? `${window.location.pathname}?${newQuery}` : window.location.pathname;
+        const newUrl = `${baseUrl}${window.location.hash || ''}`;
+        window.history.replaceState({}, document.title, newUrl);
+        return;
+    }
+
+    const storedKey = localStorage.getItem(API_KEY_STORAGE_KEY);
+    if (storedKey) {
+        setApiKey(storedKey, true);
+    }
+}
+
+function requestApiKey(message = 'Enter your API key to continue.') {
+    if (!elements.apiKeyModal) {
+        return Promise.resolve(null);
+    }
+    if (!elements.apiKeyInput || !elements.apiKeyRemember) {
+        return Promise.resolve(null);
+    }
+    if (apiKeyPrompt) {
+        return apiKeyPrompt.promise;
+    }
+
+    if (elements.apiKeyMessage) {
+        elements.apiKeyMessage.textContent = message;
+    }
+    elements.apiKeyInput.value = state.apiKey || '';
+    elements.apiKeyRemember.checked = Boolean(localStorage.getItem(API_KEY_STORAGE_KEY));
+    elements.apiKeyModal.classList.remove('hidden');
+    elements.apiKeyInput.focus();
+
+    let resolve;
+    const promise = new Promise((res) => {
+        resolve = res;
+    });
+    apiKeyPrompt = { promise, resolve };
+    return promise;
+}
+
+function closeApiKeyModal() {
+    elements.apiKeyModal?.classList.add('hidden');
+}
+
+function resolveApiKeyPrompt(value) {
+    if (!apiKeyPrompt) {
+        return;
+    }
+    apiKeyPrompt.resolve(value);
+    apiKeyPrompt = null;
+}
+
+function handleAuthError(message) {
+    clearApiKey();
+    return requestApiKey(message);
+}
+
 // API functions
-async function fetchAPI(endpoint, options = {}) {
+async function fetchAPI(endpoint, options = {}, allowRetry = true) {
+    const headers = {
+        'Content-Type': 'application/json',
+        ...options.headers,
+    };
+    if (state.apiKey && !headers['X-API-Key']) {
+        headers['X-API-Key'] = state.apiKey;
+    }
+
     const response = await fetch(`/api${endpoint}`, {
-        headers: {
-            'Content-Type': 'application/json',
-            ...options.headers,
-        },
+        headers,
         ...options,
     });
+    if (response.status === 401 && allowRetry) {
+        const apiKey = await handleAuthError('Invalid or missing API key.');
+        if (apiKey) {
+            return fetchAPI(endpoint, options, false);
+        }
+    }
     if (!response.ok) {
         throw new Error(`API error: ${response.statusText}`);
     }
@@ -268,8 +368,13 @@ const WS_MAX_RECONNECT_ATTEMPTS = 5;
 const WS_RECONNECT_DELAY = 2000;
 
 function connectWebSocket(sessionId) {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/chat/${sessionId}`;
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';    
+    const params = new URLSearchParams();
+    if (state.apiKey) {
+        params.set('api_key', state.apiKey);
+    }
+    const query = params.toString();
+    const wsUrl = `${protocol}//${window.location.host}/ws/chat/${sessionId}${query ? `?${query}` : ''}`;
 
     state.ws = new WebSocket(wsUrl);
 
@@ -289,8 +394,13 @@ function connectWebSocket(sessionId) {
     };
 
     state.ws.onclose = (event) => {
-        console.log('WebSocket disconnected', event.code, event.reason);
+        console.log('WebSocket disconnected', event.code, event.reason);        
         updateSendButton();
+
+        if (event.code === 4001) {
+            handleAuthError(event.reason || 'Invalid or missing API key.');
+            return;
+        }
 
         // Attempt reconnection if not intentionally closed
         if (state.currentSessionId === sessionId && wsReconnectAttempts < WS_MAX_RECONNECT_ATTEMPTS) {
@@ -909,10 +1019,44 @@ function updateSessionStats(stats) {
 
 function updateSendButton() {
     const hasContent = elements.messageInput.value.trim().length > 0 || state.attachedFiles.length > 0;
-    const isConnected = state.ws && state.ws.readyState === WebSocket.OPEN;
+    const isConnected = state.ws && state.ws.readyState === WebSocket.OPEN;     
     const canSend = hasContent && isConnected && !state.isStreaming;
 
     elements.sendBtn.disabled = !canSend;
+}
+
+function reconnectWebSocket() {
+    if (!state.currentSessionId) {
+        return;
+    }
+    if (state.ws) {
+        state.ws.close();
+        state.ws = null;
+    }
+    connectWebSocket(state.currentSessionId);
+}
+
+function saveApiKeyFromModal() {
+    const key = elements.apiKeyInput.value.trim();
+    if (!key) {
+        toast.error('API key required');
+        return;
+    }
+
+    const remember = elements.apiKeyRemember?.checked ?? false;
+    setApiKey(key, remember);
+    closeApiKeyModal();
+    resolveApiKeyPrompt(key);
+    reconnectWebSocket();
+}
+
+function clearApiKeyFromModal() {
+    clearApiKey();
+    if (elements.apiKeyInput) {
+        elements.apiKeyInput.value = '';
+    }
+    closeApiKeyModal();
+    resolveApiKeyPrompt(null);
 }
 
 function showStreamingStatus(show, message = 'Thinking...') {
@@ -1079,24 +1223,19 @@ async function finishRename() {
 
     if (newName && state.currentSessionId) {
         try {
-            const response = await fetch(`/api/sessions/${state.currentSessionId}`, {
+            await fetchAPI(`/sessions/${state.currentSessionId}`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name: newName }),
             });
 
-            if (response.ok) {
-                // Update the session in the sidebar
-                const item = document.querySelector(
-                    `.session-item[data-session-id="${state.currentSessionId}"]`
-                );
-                if (item) {
-                    item.querySelector('.session-item-name').textContent = newName;
-                }
-                toast.success('Session renamed');
-            } else {
-                toast.error('Failed to rename session');
+            // Update the session in the sidebar
+            const item = document.querySelector(
+                `.session-item[data-session-id="${state.currentSessionId}"]`
+            );
+            if (item) {
+                item.querySelector('.session-item-name').textContent = newName;
             }
+            toast.success('Session renamed');
         } catch (error) {
             console.error('Failed to rename session:', error);
             toast.error('Failed to rename session');
@@ -1117,33 +1256,29 @@ async function deleteCurrentSession() {
     if (!state.currentSessionId) return;
 
     try {
-        const response = await fetch(`/api/sessions/${state.currentSessionId}`, {
+        await fetchAPI(`/sessions/${state.currentSessionId}`, {
             method: 'DELETE',
         });
 
-        if (response.ok) {
-            hideDeleteModal();
-            toast.success('Session deleted');
+        hideDeleteModal();
+        toast.success('Session deleted');
 
-            // Remove from sidebar
-            const item = document.querySelector(
-                `.session-item[data-session-id="${state.currentSessionId}"]`
-            );
-            if (item) item.remove();
+        // Remove from sidebar
+        const item = document.querySelector(
+            `.session-item[data-session-id="${state.currentSessionId}"]`    
+        );
+        if (item) item.remove();
 
-            // Close WebSocket and reset state
-            if (state.ws) {
-                state.ws.close();
-                state.ws = null;
-            }
-            state.currentSessionId = null;
-
-            // Show welcome screen
-            elements.welcomeScreen?.classList.remove('hidden');
-            elements.chatContainer?.classList.add('hidden');
-        } else {
-            toast.error('Failed to delete session');
+        // Close WebSocket and reset state
+        if (state.ws) {
+            state.ws.close();
+            state.ws = null;
         }
+        state.currentSessionId = null;
+
+        // Show welcome screen
+        elements.welcomeScreen?.classList.remove('hidden');
+        elements.chatContainer?.classList.add('hidden');
     } catch (error) {
         console.error('Failed to delete session:', error);
         toast.error('Failed to delete session');
@@ -1152,21 +1287,14 @@ async function deleteCurrentSession() {
 
 async function changeModel(modelName) {
     try {
-        const response = await fetch('/api/config/model', {
+        const data = await fetchAPI('/config/model', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ model: modelName }),
         });
-
-        if (response.ok) {
-            const data = await response.json();
-            if (state.config) {
-                state.config.active_model = data.model;
-            }
-            toast.success(`Model changed to ${modelName}`);
-        } else {
-            toast.error('Failed to change model');
+        if (state.config) {
+            state.config.active_model = data.model;
         }
+        toast.success(`Model changed to ${modelName}`);
     } catch (error) {
         console.error('Failed to change model:', error);
         toast.error('Failed to change model');
@@ -1358,6 +1486,28 @@ function setupEventListeners() {
         respondToApproval(false);
     });
 
+    // API key modal
+    elements.apiKeySaveBtn?.addEventListener('click', saveApiKeyFromModal);
+    elements.apiKeyClearBtn?.addEventListener('click', clearApiKeyFromModal);
+    elements.apiKeyClose?.addEventListener('click', () => {
+        closeApiKeyModal();
+        resolveApiKeyPrompt(null);
+    });
+    elements.apiKeyModal?.querySelector('.modal-backdrop')?.addEventListener('click', () => {
+        closeApiKeyModal();
+        resolveApiKeyPrompt(null);
+    });
+    elements.apiKeyInput?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            saveApiKeyFromModal();
+        }
+        if (e.key === 'Escape') {
+            closeApiKeyModal();
+            resolveApiKeyPrompt(null);
+        }
+    });
+
     // Theme toggle
     elements.themeToggle?.addEventListener('click', toggleTheme);
     elements.themeToggleMobile?.addEventListener('click', toggleTheme);
@@ -1411,11 +1561,25 @@ function setupEventListeners() {
     elements.searchClose?.addEventListener('click', toggleSearch);
 
     // Image modal
-    elements.imageModalClose?.addEventListener('click', hideImageModal);
+    elements.imageModalClose?.addEventListener('click', hideImageModal);        
     elements.imageModal?.querySelector('.modal-backdrop')?.addEventListener('click', hideImageModal);
 
-    // Click on images in messages
+    // Toast close buttons
+    elements.toastContainer?.addEventListener('click', (e) => {
+        const closeBtn = e.target.closest('.toast-close');
+        if (closeBtn) {
+            closeBtn.parentElement.remove();
+        }
+    });
+
+    // Click handlers in messages
     elements.messages.addEventListener('click', (e) => {
+        const copyBtn = e.target.closest('.code-copy-btn');
+        if (copyBtn) {
+            copyCode(copyBtn);
+            return;
+        }
+
         if (e.target.tagName === 'IMG' && e.target.closest('.message-content')) {
             showImageModal(e.target.src);
         }
@@ -1428,6 +1592,7 @@ function setupEventListeners() {
 // Initialize
 async function init() {
     initTheme();
+    initApiKey();
     setupEventListeners();
 
     await Promise.all([

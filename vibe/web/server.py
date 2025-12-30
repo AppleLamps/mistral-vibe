@@ -11,7 +11,7 @@ import json
 import logging
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -652,6 +652,7 @@ def _format_tool_result_for_web(event: ToolResultEvent, agent: Any) -> dict[str,
         result_data["success"] = False
     elif event.skipped:
         result_data["summary"] = event.skip_reason or "Skipped"
+        result_data["skip_reason"] = event.skip_reason
         result_data["success"] = False
     elif event.result:
         tool_class = agent.tool_manager.available_tools().get(event.tool_name)
@@ -674,6 +675,15 @@ def _format_tool_result_for_web(event: ToolResultEvent, agent: Any) -> dict[str,
         result_data["duration"] = event.duration
 
     return result_data
+
+
+def _build_tool_filter(search_enabled: bool) -> Callable[[str], bool] | None:
+    """Build a per-message tool filter based on web search toggle."""
+    if search_enabled:
+        return None
+
+    blocked = {"web_search", "web_fetch"}
+    return lambda tool_name: tool_name not in blocked
 
 
 async def handle_user_message(
@@ -699,7 +709,7 @@ async def handle_user_message(
 
     # Input validation - message length
     if len(content) > MAX_MESSAGE_LENGTH:
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": WebMessageType.ERROR,
             "data": {
                 "message": f"Message too long. Maximum {MAX_MESSAGE_LENGTH} characters.",
@@ -710,7 +720,7 @@ async def handle_user_message(
 
     # Input validation - attachment count
     if len(attachments) > MAX_ATTACHMENTS:
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": WebMessageType.ERROR,
             "data": {
                 "message": f"Too many attachments. Maximum {MAX_ATTACHMENTS} allowed.",
@@ -722,7 +732,7 @@ async def handle_user_message(
     # Input validation - attachment sizes
     for attachment in attachments:
         if attachment.size > MAX_ATTACHMENT_SIZE:
-            await websocket.send_json({
+            await _safe_send_json(websocket, {
                 "type": WebMessageType.ERROR,
                 "data": {
                     "message": f"Attachment '{attachment.name}' too large. Maximum 10MB.",
@@ -733,7 +743,7 @@ async def handle_user_message(
         # Also validate base64 decoded size (base64 is ~33% larger than raw)
         expected_decoded_size = len(attachment.data) * 3 // 4
         if expected_decoded_size > MAX_ATTACHMENT_SIZE:
-            await websocket.send_json({
+            await _safe_send_json(websocket, {
                 "type": WebMessageType.ERROR,
                 "data": {
                     "message": f"Attachment '{attachment.name}' too large. Maximum 10MB.",
@@ -746,6 +756,18 @@ async def handle_user_message(
     if attachments:
         attachment_content = _process_attachments(attachments)
         content += attachment_content
+        if len(content) > MAX_MESSAGE_LENGTH:
+            await _safe_send_json(websocket, {
+                "type": WebMessageType.ERROR,
+                "data": {
+                    "message": (
+                        "Message too long after attachments. "
+                        f"Maximum {MAX_MESSAGE_LENGTH} characters."
+                    ),
+                    "code": "MESSAGE_TOO_LONG",
+                },
+            })
+            return
 
     # Require either content or attachments
     if not content.strip():
@@ -757,6 +779,8 @@ async def handle_user_message(
 
     # Get or create agent
     agent = await session.get_or_create_agent()
+    previous_tool_filter = agent.tool_filter
+    agent.tool_filter = _build_tool_filter(msg_data.search_enabled)
 
     # Set up approval callback
     async def approval_callback(
@@ -927,3 +951,5 @@ async def handle_user_message(
             "type": WebMessageType.ERROR,
             "data": {"message": _sanitize_error_message(e), "code": "AGENT_ERROR"},
         })
+    finally:
+        agent.tool_filter = previous_tool_filter

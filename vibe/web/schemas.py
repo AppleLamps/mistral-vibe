@@ -132,7 +132,12 @@ class ToolResultData(BaseModel):
     result: str | None = None
     error: str | None = None
     skipped: bool = False
+    skip_reason: str | None = None
     duration: float | None = None
+    summary: str | None = None
+    full_result: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    success: bool | None = None
 
 
 class ToolApprovalResponseData(BaseModel):

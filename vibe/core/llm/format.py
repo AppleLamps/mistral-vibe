@@ -4,7 +4,7 @@ from fnmatch import fnmatch
 from functools import lru_cache
 import json
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -75,7 +75,9 @@ def _name_matches(name: str, patterns: list[str]) -> bool:
 
 
 def get_active_tool_classes(
-    tool_manager: ToolManager, config: VibeConfig
+    tool_manager: ToolManager,
+    config: VibeConfig,
+    tool_filter: Callable[[str], bool] | None = None,
 ) -> list[type[BaseTool]]:
     """Returns a list of active tool classes based on the configuration.
 
@@ -86,20 +88,24 @@ def get_active_tool_classes(
     all_tools = list(tool_manager.available_tools().values())
 
     if config.enabled_tools:
-        return [
+        active = [
             tool_class
             for tool_class in all_tools
             if _name_matches(tool_class.get_name(), config.enabled_tools)
         ]
-
-    if config.disabled_tools:
-        return [
+    elif config.disabled_tools:
+        active = [
             tool_class
             for tool_class in all_tools
             if not _name_matches(tool_class.get_name(), config.disabled_tools)
         ]
+    else:
+        active = all_tools
 
-    return all_tools
+    if tool_filter is None:
+        return active
+
+    return [tool_class for tool_class in active if tool_filter(tool_class.get_name())]
 
 
 class ParsedToolCall(BaseModel):
@@ -145,9 +151,12 @@ class APIToolFormatHandler:
         return "api"
 
     def get_available_tools(
-        self, tool_manager: ToolManager, config: VibeConfig
+        self,
+        tool_manager: ToolManager,
+        config: VibeConfig,
+        tool_filter: Callable[[str], bool] | None = None,
     ) -> list[AvailableTool]:
-        active_tools = get_active_tool_classes(tool_manager, config)
+        active_tools = get_active_tool_classes(tool_manager, config, tool_filter)
 
         return [
             AvailableTool(
@@ -209,14 +218,20 @@ class APIToolFormatHandler:
         return ParsedMessage(tool_calls=tool_calls)
 
     def resolve_tool_calls(
-        self, parsed: ParsedMessage, tool_manager: ToolManager, config: VibeConfig
+        self,
+        parsed: ParsedMessage,
+        tool_manager: ToolManager,
+        config: VibeConfig,
+        tool_filter: Callable[[str], bool] | None = None,
     ) -> ResolvedMessage:
         resolved_calls = []
         failed_calls = []
 
         active_tools = {
             tool_class.get_name(): tool_class
-            for tool_class in get_active_tool_classes(tool_manager, config)
+            for tool_class in get_active_tool_classes(
+                tool_manager, config, tool_filter
+            )
         }
 
         for parsed_call in parsed.tool_calls:

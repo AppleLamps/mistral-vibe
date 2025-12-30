@@ -117,6 +117,7 @@ class Agent:
         self.tool_manager = ToolManager(config)
         self.skill_manager = SkillManager(config)
         self.format_handler = APIToolFormatHandler()
+        self.tool_filter: Callable[[str], bool] | None = None
 
         self.backend_factory = lambda: backend or self._select_backend()
         self.backend = self.backend_factory()
@@ -446,7 +447,7 @@ class Agent:
 
         parsed = self.format_handler.parse_message(last_message)
         resolved = self.format_handler.resolve_tool_calls(
-            parsed, self.tool_manager, self.config
+            parsed, self.tool_manager, self.config, self.tool_filter
         )
 
         if not resolved.tool_calls and not resolved.failed_calls:
@@ -841,7 +842,7 @@ class Agent:
         provider = self.config.get_provider_for_model(active_model)
 
         available_tools = self.format_handler.get_available_tools(
-            self.tool_manager, self.config
+            self.tool_manager, self.config, self.tool_filter
         )
         tool_choice = self.format_handler.get_tool_choice()
 
@@ -886,7 +887,7 @@ class Agent:
         provider = self.config.get_provider_for_model(active_model)
 
         available_tools = self.format_handler.get_available_tools(
-            self.tool_manager, self.config
+            self.tool_manager, self.config, self.tool_filter
         )
         tool_choice = self.format_handler.get_tool_choice()
         try:
@@ -1184,7 +1185,7 @@ class Agent:
                     model=active_model,
                     messages=self.messages,
                     tools=self.format_handler.get_available_tools(
-                        self.tool_manager, self.config
+                        self.tool_manager, self.config, self.tool_filter
                     ),
                     extra_headers={"user-agent": get_user_agent(provider.backend)},
                 )
