@@ -776,11 +776,13 @@ html, body {
     opacity: 0.9;
 }
 
-/* Tool Calls Container - separates tool calls from text content */
+/* Tool Calls Container - Claude Code style */
 .tool-calls-container {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 2px;
+    font-family: var(--font-mono);
+    font-size: 13px;
 }
 
 .tool-calls-container:empty {
@@ -793,148 +795,185 @@ html, body {
 }
 
 .tool-calls-container:not(:empty) + .text-content:not(:empty) {
-    margin-top: 12px;
+    margin-top: 16px;
 }
 
-/* Tool Call Message - Clean minimal style */
+/* Tool Call - Claude Code minimal style */
 .tool-call {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.6;
+}
+
+.tool-call-main {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 2px 0;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+    border-radius: var(--radius-sm);
+}
+
+.tool-call-main:hover {
     background: var(--bg-secondary);
-    border-radius: var(--radius-md);
-    overflow: hidden;
-    font-size: 13px;
+}
+
+/* Status dot indicator */
+.tool-call-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    margin-top: 6px;
+}
+
+.tool-call-dot.pending {
+    background: var(--accent);
+    animation: dotPulse 1.2s ease-in-out infinite;
+}
+
+.tool-call-dot.success {
+    background: var(--success);
+}
+
+.tool-call-dot.error {
+    background: var(--error);
+}
+
+.tool-call-dot.skipped {
+    background: var(--warning);
+}
+
+@keyframes dotPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+.tool-call-content {
+    flex: 1;
+    min-width: 0;
 }
 
 .tool-call-header {
-    padding: 8px 12px;
     display: flex;
     align-items: center;
     gap: 8px;
-    cursor: pointer;
-    user-select: none;
-    transition: background var(--transition-fast);
-}
-
-.tool-call-header:hover {
-    background: var(--bg-tertiary);
-}
-
-.tool-call-header:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
-}
-
-.tool-call-icon {
-    color: var(--accent);
-    display: flex;
-    align-items: center;
-    flex-shrink: 0;
-}
-
-.tool-call-summary {
-    flex: 1;
     color: var(--text-primary);
+}
+
+.tool-call-name {
     font-weight: 500;
+    color: var(--accent);
 }
 
-.tool-call-duration {
-    font-size: 12px;
-    color: var(--text-muted);
+.tool-call-path {
+    color: var(--text-primary);
+    word-break: break-all;
 }
 
-.tool-call-status {
+.tool-call-summary-text {
+    color: var(--text-secondary);
+}
+
+/* Result sub-line with tree connector */
+.tool-call-result-line {
     display: flex;
-    align-items: center;
-    justify-content: center;
+    align-items: flex-start;
+    gap: 8px;
+    padding-left: 16px;
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.tool-call-result-line:empty {
+    display: none;
+}
+
+.tool-call-tree-connector {
+    color: var(--text-muted);
+    flex-shrink: 0;
+    user-select: none;
+}
+
+.tool-call-result-text {
+    flex: 1;
+}
+
+.tool-call-result-text.error {
+    color: var(--error);
+}
+
+.tool-call-result-text.warning {
+    color: var(--warning);
+}
+
+/* Expandable details */
+.tool-call-details {
+    margin-left: 16px;
+    margin-top: 4px;
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.tool-call-details.hidden {
+    display: none;
+}
+
+.tool-call-details pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text-secondary);
+}
+
+.tool-call-details-section {
+    margin-bottom: 8px;
+}
+
+.tool-call-details-section:last-child {
+    margin-bottom: 0;
+}
+
+.tool-call-details-label {
+    font-weight: 500;
+    color: var(--text-muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+
+/* Duration badge */
+.tool-call-duration {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-left: auto;
     flex-shrink: 0;
 }
 
-.tool-call-status.pending .spinner {
-    width: 14px;
-    height: 14px;
-    border: 2px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
+/* Legacy support - hide old elements */
+.tool-call-icon,
+.tool-call-toggle,
+.tool-call-status {
+    display: none;
+}
+
+/* Historical tool calls - same style but non-interactive */
+.tool-call.historical .tool-call-main {
+    cursor: default;
+}
+
+.tool-call.historical .tool-call-main:hover {
+    background: transparent;
 }
 
 @keyframes spin {
     to { transform: rotate(360deg); }
-}
-
-.tool-call-status.success {
-    color: var(--success);
-}
-
-.tool-call-status.error {
-    color: var(--error);
-}
-
-.tool-call-status.skipped {
-    color: var(--warning);
-}
-
-.tool-call-toggle {
-    background: none;
-    border: none;
-    padding: 4px;
-    cursor: pointer;
-    color: var(--text-muted);
-    display: flex;
-    align-items: center;
-    transition: transform var(--transition-fast), color var(--transition-fast);
-}
-
-.tool-call-toggle:hover {
-    color: var(--text-primary);
-}
-
-/* Tool Call Body - Collapsible */
-.tool-call-body {
-    max-height: 400px;
-    overflow: hidden;
-    transition: max-height 0.2s ease;
-}
-
-.tool-call-body.collapsed {
-    max-height: 0;
-}
-
-.tool-call-body:not(.collapsed) {
-    padding: 0 12px 12px;
-}
-
-.tool-call-args {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    background: var(--code-bg);
-    padding: 10px;
-    border-radius: var(--radius-sm);
-    overflow-x: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
-    margin: 0;
-    max-height: 200px;
-    overflow-y: auto;
-    color: var(--text-secondary);
-}
-
-.tool-call-result:empty {
-    display: none;
-}
-
-.tool-call-result pre {
-    margin: 8px 0 0;
-    padding: 10px;
-    background: var(--code-bg);
-    border-radius: var(--radius-sm);
-    font-family: var(--font-mono);
-    font-size: 12px;
-    overflow-x: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 200px;
-    overflow-y: auto;
-    color: var(--text-secondary);
 }
 
 .tool-result {
